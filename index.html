@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG 文档问答</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --brand: #16a34a;
+    --brand-dark: #15803d;
+    --user-bubble: #dcfce7;
+    --bot-bubble: #f3f4f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 28px 20px 48px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .lead { color: var(--muted); font-size: 14px; margin: 0 0 22px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 15px;
+    margin: 0 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .step {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--brand);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  input[type="file"] {
+    font: inherit;
+    font-size: 14px;
+  }
+  input[type="text"] {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font: inherit;
+    outline: none;
+  }
+  input[type="text"]:focus { border-color: var(--brand); }
+  button {
+    padding: 10px 18px;
+    border: none;
+    border-radius: 8px;
+    background: var(--brand);
+    color: #fff;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  button:hover { background: var(--brand-dark); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .status { font-size: 13px; color: var(--muted); margin: 12px 0 0; min-height: 20px; }
+  .status.ok { color: var(--brand-dark); }
+  .status.err { color: #b91c1c; }
+  #messages { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
+  .msg.bot { align-self: flex-start; background: var(--bot-bubble); border-bottom-left-radius: 4px; }
+  .empty { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>RAG 文档问答</h1>
+    <p class="lead">上传一份 PDF，然后基于它的内容提问。</p>
+
+    <section class="card">
+      <h2><span class="step">1</span>上传文档</h2>
+      <div class="row">
+        <input type="file" id="file" accept=".pdf">
+        <button id="uploadBtn">上传并入库</button>
+      </div>
+      <p class="status" id="uploadStatus">选择一份 PDF 文件后点击上传。</p>
+    </section>
+
+    <section class="card">
+      <h2><span class="step">2</span>提问</h2>
+      <div id="messages"><p class="empty">还没有对话。先上传文档，然后在这里提问。</p></div>
+      <form class="row" id="askForm">
+        <input type="text" id="question" placeholder="输入你的问题，例如：这份文档的核心结论是什么？" autocomplete="off">
+        <button type="submit" id="askBtn">提问</button>
+      </form>
+    </section>
+  </div>
+
+<script>
+  const fileInput = document.getElementById('file');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const uploadStatus = document.getElementById('uploadStatus');
+  const askForm = document.getElementById('askForm');
+  const askBtn = document.getElementById('askBtn');
+  const questionInput = document.getElementById('question');
+  const messages = document.getElementById('messages');
+
+  function setStatus(text, type) {
+    uploadStatus.textContent = text;
+    uploadStatus.className = 'status' + (type ? ' ' + type : '');
+  }
+
+  function addMessage(text, who) {
+    const empty = messages.querySelector('.empty');
+    if (empty) empty.remove();
+    const div = document.createElement('div');
+    div.className = 'msg ' + who;
+    div.textContent = text;
+    messages.appendChild(div);
+    return div;
+  }
+
+  uploadBtn.addEventListener('click', async () => {
+    const file = fileInput.files[0];
+    if (!file) {
+      setStatus('请先选择一份 PDF 文件。', 'err');
+      return;
+    }
+    uploadBtn.disabled = true;
+    setStatus('正在解析并建立向量库，请稍候…');
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/upload', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '上传失败');
+      setStatus('入库成功："' + file.name + '" 被切成了 ' + data.chunk_num + ' 段，现在可以提问了。', 'ok');
+    } catch (e) {
+      setStatus('上传失败：' + e.message, 'err');
+    } finally {
+      uploadBtn.disabled = false;
+    }
+  });
+
+  askForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = questionInput.value.trim();
+    if (!q) return;
+    addMessage(q, 'user');
+    questionInput.value = '';
+    askBtn.disabled = true;
+    const pending = addMessage('思考中…', 'bot');
+    try {
+      const res = await fetch('/query?question=' + encodeURIComponent(q));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '回答失败');
+      pending.textContent = data.answer;
+    } catch (e) {
+      pending.textContent = '出错了：' + e.message;
+    } finally {
+      askBtn.disabled = false;
+      questionInput.focus();
+    }
+  });
+</script>
+</body>
+</html>
