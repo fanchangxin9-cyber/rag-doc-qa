@@ -6,6 +6,7 @@
 
 `git init` 在`RAG_demo` 里建仓库（多了个隐藏的`.git` 文件夹）
 写`.gitignore` 列出「别管这些」：`venv` 、`faiss_db` 、`fastembed_cache` 、`__pycache__` 、`secret.py`
+`git branch -m main`# 把当前分支改名为 main
 
 # 日常三件套
 
