@@ -87,6 +87,10 @@
   .msg.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
   .msg.bot { align-self: flex-start; background: var(--bot-bubble); border-bottom-left-radius: 4px; }
   .empty { color: var(--muted); font-size: 14px; }
+  .doc-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .doc-item { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+  .doc-count { color: var(--muted); }
+  .doc-empty { font-size: 13px; color: var(--muted); }
   .sources { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
   .sources-hd { font-size: 12px; color: var(--muted); }
   .source { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
@@ -106,6 +110,7 @@
         <button id="uploadBtn">上传并入库</button>
       </div>
       <p class="status" id="uploadStatus">选择一份 PDF 文件后点击上传。</p>
+      <div id="docList" class="doc-list"></div>
     </section>
 
     <section class="card">
@@ -126,6 +131,7 @@
   const askBtn = document.getElementById('askBtn');
   const questionInput = document.getElementById('question');
   const messages = document.getElementById('messages');
+  const docList = document.getElementById('docList');
 
   function setStatus(text, type) {
     uploadStatus.textContent = text;
@@ -172,6 +178,35 @@
 
     container.appendChild(box);
   }
+  
+  // 读取知识库里已有的文件，显示成一张清单
+  async function loadDocuments() {
+    try {
+      const res = await fetch('/documents');
+      const data = await res.json();
+      docList.innerHTML = '';
+      if (!data.files || data.files.length === 0) {
+        docList.innerHTML = '<div class="doc-empty">知识库还是空的，上传一份 PDF 试试。</div>';
+        return;
+      }
+      data.files.forEach(function (f) {
+        const row = document.createElement('div');
+        row.className = 'doc-item';
+        const name = document.createElement('span');
+        name.textContent = f.file;
+        const count = document.createElement('span');
+        count.className = 'doc-count';
+        count.textContent = f.chunk_num + ' 段';
+        row.appendChild(name);
+        row.appendChild(count);
+        docList.appendChild(row);
+      });
+    } catch (e) {
+      docList.innerHTML = '<div class="doc-empty">读取知识库失败：' + e.message + '</div>';
+    }
+  }
+
+  loadDocuments();   // 页面一打开就先读一次
 
   uploadBtn.addEventListener('click', async () => {
     const file = fileInput.files[0];
@@ -188,6 +223,7 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '上传失败');
       setStatus('入库成功："' + file.name + '" 切成 ' + data.chunk_num + ' 段；向量库里现在共 ' + data.total + ' 段。可以继续传别的文件，也可以直接提问。', 'ok');
+      loadDocuments();
     } catch (e) {
       setStatus('上传失败：' + e.message, 'err');
     } finally {

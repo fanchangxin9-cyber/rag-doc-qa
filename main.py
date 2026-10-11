@@ -51,9 +51,16 @@ async def upload_pdf(file: UploadFile = File(...)):
     for d in split_docs:
         d.metadata["file_name"] = file.filename
 
-    # 向量库已存在 → 把新文档追加进去；不存在 → 新建一个
+    # 向量库已存在 → 先查重，再追加；不存在 → 新建一个
     if os.path.exists(DB_PATH):
         db = FAISS.load_local(DB_PATH, EMBEDDING, allow_dangerous_deserialization=True)
+
+        # 查重：这个文件是不是已经入库了？
+        for d in db.docstore._dict.values():
+            if d.metadata.get("file_name") == file.filename:
+                os.remove(temp_path)
+                raise HTTPException(status_code=400, detail=f"「{file.filename}」已经在知识库里了，不用重复上传")
+
         db.add_documents(split_docs)
     else:
         db = FAISS.from_documents(split_docs, EMBEDDING)
@@ -105,6 +112,28 @@ async def query(question: str):
         })
 
     return {"answer": answer, "sources": sources}
+
+# 5. 列出知识库里已经有哪些文件
+@app.get("/documents")
+def list_documents():
+    # 库里还是空的
+    if not os.path.exists(DB_PATH):
+        return {"files": [], "total": 0}
+
+    db = FAISS.load_local(DB_PATH, EMBEDDING, allow_dangerous_deserialization=True)
+
+    # 数一数每个文件各有多少段
+    counts = {}
+    for d in db.docstore._dict.values():
+        name = d.metadata.get("file_name", "未知文件")
+        counts[name] = counts.get(name, 0) + 1
+
+    # 整理成一份清单
+    files = []
+    for name, count in counts.items():
+        files.append({"file": name, "chunk_num": count})
+
+    return {"files": files, "total": db.index.ntotal}
 
 if __name__ == "__main__":
     import uvicorn
