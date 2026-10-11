@@ -90,6 +90,8 @@
   .doc-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
   .doc-item { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
   .doc-count { color: var(--muted); }
+  .doc-del { border: 1px solid var(--border); background: var(--card); color: var(--muted); border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+  .doc-del:hover { color: #b91c1c; border-color: #b91c1c; }
   .doc-empty { font-size: 13px; color: var(--muted); }
   .sources { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
   .sources-hd { font-size: 12px; color: var(--muted); }
@@ -178,7 +180,7 @@
 
     container.appendChild(box);
   }
-  
+
   // 读取知识库里已有的文件，显示成一张清单
   async function loadDocuments() {
     try {
@@ -199,6 +201,13 @@
         count.textContent = f.chunk_num + ' 段';
         row.appendChild(name);
         row.appendChild(count);
+        const del = document.createElement('button');
+        del.className = 'doc-del';
+        del.textContent = '删除';
+        del.addEventListener('click', function () {
+          deleteDocument(f.file);
+        });
+        row.appendChild(del);  
         docList.appendChild(row);
       });
     } catch (e) {
@@ -207,6 +216,19 @@
   }
 
   loadDocuments();   // 页面一打开就先读一次
+
+  // 删除某个文件
+  async function deleteDocument(name) {
+    if (!confirm('确定要从知识库里删除「' + name + '」吗？')) return;
+    try {
+      const res = await fetch('/documents?file=' + encodeURIComponent(name), { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '删除失败');
+      loadDocuments();
+    } catch (e) {
+      alert('删除失败：' + e.message);
+    }
+  }
 
   uploadBtn.addEventListener('click', async () => {
     const file = fileInput.files[0];

@@ -6,6 +6,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import FastEmbedEmbeddings
 import os
+import shutil
 
 # 密钥单独放在 secret.py 里（该文件已被 .gitignore 排除，不会泄露到 GitHub）
 from secret import DEEPSEEK_API_KEY
@@ -134,6 +135,33 @@ def list_documents():
         files.append({"file": name, "chunk_num": count})
 
     return {"files": files, "total": db.index.ntotal}
+
+# 6. 从知识库里删除某一份文件
+@app.delete("/documents")
+def delete_document(file: str):
+    # 守卫：库是空的
+    if not os.path.exists(DB_PATH):
+        raise HTTPException(status_code=400, detail="知识库还是空的，没有可删除的文件")
+
+    db = FAISS.load_local(DB_PATH, EMBEDDING, allow_dangerous_deserialization=True)
+
+    # 把「不属于这个文件」的段挑出来，这些是要保留的
+    keep = []
+    for d in db.docstore._dict.values():
+        if d.metadata.get("file_name") != file:
+            keep.append(d)
+
+    # 保留的数量和原来一样多 → 说明一段都没删掉 → 这个文件不在库里
+    if len(keep) == db.index.ntotal:
+        raise HTTPException(status_code=400, detail=f"知识库里没有「{file}」这个文件")
+
+    # FAISS 不能直接删单个向量 → 干脆删掉旧库，用剩下的段重建
+    shutil.rmtree(DB_PATH)
+    if len(keep) > 0:
+        new_db = FAISS.from_documents(keep, EMBEDDING)
+        new_db.save_local(DB_PATH)
+
+    return {"msg": "已删除", "file": file, "left": len(keep)}
 
 if __name__ == "__main__":
     import uvicorn
