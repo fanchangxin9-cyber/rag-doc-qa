@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -42,6 +42,10 @@ async def upload_pdf(file: UploadFile = File(...)):
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     split_docs = splitter.split_documents(docs)
 
+     # 守卫：这份 PDF 里一个字都没读出来（可能是扫描件/图片版）
+    if not split_docs:
+        raise HTTPException(status_code=400, detail="这份 PDF 里读不到文字，可能是扫描件或图片版，请换一份能选中文字的 PDF")
+
     # 给每一段贴上「来自哪个文件」的标签，方便以后显示引用来源
     # 这是一个 for 循环：把 split_docs 里的每一段，依次装进 d 这个盒子
     for d in split_docs:
@@ -66,6 +70,11 @@ async def upload_pdf(file: UploadFile = File(...)):
 # 4. 问答接口：先检索相关原文，再连同问题一起交给大模型
 @app.get("/query")
 async def query(question: str):
+
+        # 守卫：库里还没有任何文档，就友好提示，而不是崩掉
+    if not os.path.exists(DB_PATH):
+        raise HTTPException(status_code=400, detail="知识库还是空的，请先上传一份 PDF")
+
     # ① 加载向量库
     db = FAISS.load_local(DB_PATH, EMBEDDING, allow_dangerous_deserialization=True)
 
