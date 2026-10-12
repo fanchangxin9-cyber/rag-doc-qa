@@ -100,11 +100,29 @@ def chat(req: ChatRequest):
     if db is None:
         raise HTTPException(status_code=400, detail="知识库还是空的，请先上传一份文档")
 
+    # ⓪ 查询改写：把追问补成能独立检索的问题（无历史则原样返回，不会多花钱）
+    #    注意【只用于检索】—— 答案仍按用户原话生成，因为模型本来就能看到完整历史，
+    #    而改写句丢了原话的细节，拿它当问题反而更容易答偏。
+    if config.QUERY_REWRITE:
+        search_query = generation.rewrite_query(req.session_id, req.question)
+    else:
+        search_query = req.question     
+
     # ①② 检索 + 拼资料（情报组和文案纯函数，用法和改造前一样）
     corpus = knowledge.all_chunks(db)
-    results, rerank_used = retrieval.retrieve(db, req.question, corpus)
+    results, rerank_used = retrieval.retrieve(db, search_query, corpus)
     context, sources = generation.build_context(results)
-    note = "" if rerank_used else "重排模型未就绪，本次按向量检索结果作答"
+
+    # 提示条：把"用户需要知道、但那个数字表达不了"的事拼成一句话 —— 前端会渲染成黄色提示。
+    # 为什么相关度数字里不说这些？见 generation._ratios 的说明：
+    # 数字只负责"组内谁更相关"，"整体可不可信"单独说，两者才不会互相打架。
+    notes = []
+    if not rerank_used:
+        notes.append("重排模型未就绪，本次按向量检索结果作答")
+    weak = generation.weak_match_note(results)
+    if weak:
+        notes.append(weak)
+    note = "　".join(notes)
 
     # 这是个【同步生成器】：FastAPI 会一段一段地把它取出来推给浏览器，
     # 而不是等它全部跑完。这就是"流式"的实现方式。
