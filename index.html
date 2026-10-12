@@ -83,9 +83,11 @@
   .status.ok { color: var(--brand-dark); }
   .status.err { color: #b91c1c; }
   #messages { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
-  .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+  /* 答案里可能有换行，所以换行交给里面的 .answer 处理，气泡本身用普通排版 */
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; word-break: break-word; white-space: normal; }
   .msg.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
   .msg.bot { align-self: flex-start; background: var(--bot-bubble); border-bottom-left-radius: 4px; }
+  .answer { white-space: pre-wrap; }
   .empty { color: var(--muted); font-size: 14px; }
   .doc-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
   .doc-item { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
@@ -95,15 +97,48 @@
   .doc-empty { font-size: 13px; color: var(--muted); }
   .sources { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
   .sources-hd { font-size: 12px; color: var(--muted); }
-  .source { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .source { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; transition: box-shadow .2s, border-color .2s; }
   .source-hd { font-size: 13px; font-weight: 500; color: var(--brand-dark); margin-bottom: 4px; }
   .source-text { font-size: 13px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+
+  /* ============ 本次升级新增的样式 ============ */
+
+  /* 答案里的引用标签，例如 [1] */
+  .cite {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 4px;
+    border: 1px solid var(--brand); background: var(--user-bubble);
+    color: var(--brand-dark); font: inherit; font-size: 12px; line-height: 18px;
+    cursor: pointer; vertical-align: 1px;
+  }
+  .cite:hover { background: var(--brand); color: #fff; }
+
+  /* 被引用过的来源卡片：边框变绿 */
+  .source.cited { border-color: var(--brand); }
+  /* 从引用标签跳过来时闪一下 */
+  .source.flash { box-shadow: 0 0 0 3px rgba(22, 163, 74, .25); }
+
+  /* 来源原文默认折成 3 行，"展开全文"按钮切换 */
+  .source-text.clamped {
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .source-toggle {
+    margin-top: 6px; padding: 2px 10px; font-size: 12px; color: var(--muted);
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    font-weight: 400; cursor: pointer;
+  }
+  .source-toggle:hover { background: var(--bg); }
+
+  /* 重排模型没就绪时的黄色提示条 */
+  .src-note {
+    font-size: 12px; color: #b45309; background: #fffbeb;
+    border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px;
+  }
 </style>
 </head>
 <body>
   <div class="wrap">
     <h1>RAG 文档问答</h1>
-    <p class="lead">上传一份或多份 PDF，然后基于它们的内容提问，答案会附带引用来源。</p>
+    <p class="lead">上传一份或多份 PDF，然后基于它们的内容提问。答案会标注引用编号，点编号可以跳回原文核对。</p>
 
     <section class="card">
       <h2><span class="step">1</span>上传文档</h2>
@@ -150,35 +185,108 @@
     return div;
   }
 
-  // 把后端返回的「引用来源」渲染成一列小卡片
-  function renderSources(container, sources) {
-    if (!sources || sources.length === 0) return;
+  // ============================================================
+  // 引用溯源：把答案里的 [n] 变成可点击标签
+  // ============================================================
+  // 安全提醒：这里【绝不能】用 innerHTML 拼模型输出的内容。
+  // 模型吐什么我们就渲染什么，万一它吐出一段 <script> 就被执行了。
+  // 所以一律用 createElement + textContent —— 这两个 API 会把内容当"纯文字"，
+  // 尖括号、引号都会被原样显示出来，不会被当成 HTML 解析。
+  function renderAnswer(answerEl, text, sourcesBox) {
+    answerEl.textContent = '';
+    const cited = [];
+
+    // 按 [数字] 切开，分隔符本身也保留在数组里（正则带括号会有这个效果）
+    const parts = text.split(/(\[\d+\])/);
+    parts.forEach(function (part) {
+      const m = part.match(/^\[(\d+)\]$/);
+      if (m) {
+        const n = Number(m[1]);
+        const hit = sourcesBox.querySelector('.source[data-index="' + n + '"]');
+        if (hit) {                              // 只把"真实存在"的编号做成标签
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'cite';
+          chip.textContent = '[' + n + ']';
+          chip.addEventListener('click', function () { focusSource(hit); });
+          answerEl.appendChild(chip);
+          cited.push(n);
+          return;
+        }
+      }
+      answerEl.appendChild(document.createTextNode(part));   // 普通文字
+    });
+
+    // 被引用过的来源卡片加个标记（边框变绿）
+    cited.forEach(function (n) {
+      const el = sourcesBox.querySelector('.source[data-index="' + n + '"]');
+      if (el) el.classList.add('cited');
+    });
+  }
+
+  // 点击引用标签 → 把对应来源卡片滚到眼前、展开、闪一下
+  function focusSource(el) {
+    const text = el.querySelector('.source-text');
+    if (text) text.classList.remove('clamped');
+    const toggle = el.querySelector('.source-toggle');
+    if (toggle) toggle.textContent = '收起';
+
+    el.classList.add('flash');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(function () { el.classList.remove('flash'); }, 1200);
+  }
+
+  // 渲染来源清单：编号 + 相关度分数 + 可展开的完整原文
+  function renderSources(container, sources, note) {
     const box = document.createElement('div');
     box.className = 'sources';
+    container.appendChild(box);              // 先挂进页面，后面只管往里加东西
+
+    if (note) {
+      const warn = document.createElement('div');
+      warn.className = 'src-note';
+      warn.textContent = '提示：' + note;
+      box.appendChild(warn);
+    }
+    if (!sources || sources.length === 0) return box;
 
     const hd = document.createElement('div');
     hd.className = 'sources-hd';
-    hd.textContent = '引用来源（回答依据下面这几段原文）';
+    hd.textContent = '引用来源（点答案里的 [n] 可以跳到这里）';
     box.appendChild(hd);
 
-    sources.forEach(function (s, i) {
+    sources.forEach(function (s) {
       const item = document.createElement('div');
       item.className = 'source';
+      item.setAttribute('data-index', s.index);   // 答案里的 [n] 靠这个找到它
 
       const title = document.createElement('div');
       title.className = 'source-hd';
-      title.textContent = '[' + (i + 1) + '] ' + s.file + ' · 第 ' + s.page + ' 页';
+      const scoreTxt = (s.score === null || s.score === undefined)
+        ? '未重排'
+        : '相关度 ' + s.score.toFixed(2);
+      title.textContent = '[' + s.index + '] ' + s.file + ' · 第 ' + s.page + ' 页 · ' + scoreTxt;
 
       const text = document.createElement('div');
-      text.className = 'source-text';
-      text.textContent = s.text + '…';
+      text.className = 'source-text clamped';     // 默认折叠成 3 行
+      text.textContent = s.text;
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'source-toggle';
+      toggle.textContent = '展开全文';
+      toggle.addEventListener('click', function () {
+        const folded = text.classList.toggle('clamped');
+        toggle.textContent = folded ? '展开全文' : '收起';
+      });
 
       item.appendChild(title);
       item.appendChild(text);
+      item.appendChild(toggle);
       box.appendChild(item);
     });
 
-    container.appendChild(box);
+    return box;
   }
 
   // 读取知识库里已有的文件，显示成一张清单
@@ -207,7 +315,7 @@
         del.addEventListener('click', function () {
           deleteDocument(f.file);
         });
-        row.appendChild(del);  
+        row.appendChild(del);
         docList.appendChild(row);
       });
     } catch (e) {
@@ -257,18 +365,29 @@
     e.preventDefault();
     const q = questionInput.value.trim();
     if (!q) return;
+
     addMessage(q, 'user');
     questionInput.value = '';
     askBtn.disabled = true;
-    const pending = addMessage('思考中…', 'bot');
+
+    // 先摆一个气泡和一个"答案区"，等后端回话
+    const bubble = addMessage('', 'bot');
+    const answerEl = document.createElement('div');
+    answerEl.className = 'answer';
+    answerEl.textContent = '思考中…';
+    bubble.appendChild(answerEl);
+
     try {
       const res = await fetch('/query?question=' + encodeURIComponent(q));
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '回答失败');
-      pending.textContent = data.answer;
-      renderSources(pending, data.sources);
+
+      // 顺序很重要：先建来源卡片，答案里的 [n] 才能找到跳转目标
+      const sourcesBox = renderSources(bubble, data.sources, data.note);
+      renderAnswer(answerEl, data.answer, sourcesBox);
+      answerEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (e) {
-      pending.textContent = '出错了：' + e.message;
+      answerEl.textContent = '出错了：' + e.message;
     } finally {
       askBtn.disabled = false;
       questionInput.focus();
