@@ -216,15 +216,15 @@
 <body>
   <div class="wrap">
     <h1>RAG 文档问答</h1>
-    <p class="lead">上传一份或多份 PDF，然后基于它们的内容提问。答案会一个字一个字显示出来，并标注引用编号——点编号可以跳回原文核对。同一个会话里可以接着追问。</p>
+    <p class="lead">上传文档（PDF / Word / Markdown / TXT），然后基于它们的内容提问。答案会一个字一个字显示出来，并标注引用编号——点编号可以跳回原文核对。同一个会话里可以接着追问。</p>
 
     <section class="card">
       <h2><span class="step">1</span>上传文档</h2>
       <div class="row">
-        <input type="file" id="file" accept=".pdf">
+        <input type="file" id="file" accept=".pdf,.docx,.md,.markdown,.txt">
         <button id="uploadBtn">上传并入库</button>
       </div>
-      <p class="status" id="uploadStatus">选择一份 PDF 文件后点击上传。</p>
+      <p class="status" id="uploadStatus">选择文档（PDF / Word / Markdown / TXT）后点击上传。</p>
       <div id="docList" class="doc-list"></div>
     </section>
 
@@ -384,7 +384,8 @@
       const scoreTxt = (s.score === null || s.score === undefined)
         ? '未重排'
         : '相关度 ' + s.score.toFixed(2);
-      title.textContent = '[' + s.index + '] ' + s.file + ' · 第 ' + s.page + ' 页 · ' + scoreTxt;
+      title.textContent = '[' + s.index + '] ' + s.file
+        + (s.location ? ' · ' + s.location : '') + ' · ' + scoreTxt;
 
       const text = document.createElement('div');
       text.className = 'source-text clamped';     // 默认折叠成 3 行
@@ -701,7 +702,7 @@
       const data = await res.json();
       docList.innerHTML = '';
       if (!data.files || data.files.length === 0) {
-        docList.innerHTML = '<div class="doc-empty">知识库还是空的，上传一份 PDF 试试。</div>';
+        docList.innerHTML = '<div class="doc-empty">知识库还是空的，上传一份文档试试。</div>';
         return;
       }
       data.files.forEach(function (f) {
@@ -746,7 +747,7 @@
   uploadBtn.addEventListener('click', async () => {
     const file = fileInput.files[0];
     if (!file) {
-      setStatus('请先选择一份 PDF 文件。', 'err');
+      setStatus('请先选择一份文件。', 'err');
       return;
     }
     uploadBtn.disabled = true;

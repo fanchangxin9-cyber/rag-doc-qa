@@ -58,7 +58,7 @@ def index():
 # 知识库：收文件 / 列清单 / 删文件 —— 全部转交档案室
 # ============================================================
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...)):
     content = await file.read()          # "把上传的内容读出来"是网页这一层的事
     return knowledge.add_file(content, file.filename)
 
@@ -98,7 +98,7 @@ def chat(req: ChatRequest):
     # 守卫：知识库为空 —— 此刻"还没开始流"，所以还能正常返回 400
     db = knowledge.load_db()
     if db is None:
-        raise HTTPException(status_code=400, detail="知识库还是空的，请先上传一份 PDF")
+        raise HTTPException(status_code=400, detail="知识库还是空的，请先上传一份文档")
 
     # ①② 检索 + 拼资料（情报组和文案纯函数，用法和改造前一样）
     corpus = knowledge.all_chunks(db)

@@ -67,15 +67,38 @@ def get_llm():
 
 
 def _score_to_ratio(logit: float) -> float:
-    """把重排模型的原始打分压进 0~1，变成人看得懂的"相关度"。
-
-    重排模型吐的是没有上下界的原始分（logit）——可能 -15，也可能 +8。
-    界面上直接写「相关度 -10.20」，用户会以为系统坏了；其实它只是想说
-    "这段最不相关"。
+    """把单条原始分（logit）压进 0~1：正数 → 接近 1，负数 → 接近 0。
 
     套一个 sigmoid（S 形函数）就好了：正数 → 接近 1，负数 → 接近 0，0 → 0.5。
+
+    现在它只在两种「退化情况」下出场：本次只有一条候选、或所有候选分数一样 ——
+    那时没有"高低"可言，只能看这条资料【本身】够不够相关。见 _ratios()。
     """
     return round(1 / (1 + math.exp(-logit)), 4)
+
+
+def _ratios(raw: list) -> list:
+    """把「本次召回的一组原始分」整组映射成 0~1 的相关度，保持排序不变。
+
+    为什么不能像以前那样，一条条套 sigmoid 就完事？
+      重排模型吐的是【无上下界】的 logit：相关的约 +1~+3，不相关的挤在 -5~-10。
+      sigmoid 会把 -5 以下全部压成 0.000x，界面取两位小数就全是 0.00 ——
+      一次回答给 5 条来源、通常只有 1 条真相关，于是 4 条都显示 0，看着像坏了。
+      实测下来排序是准的，坏的只是"刻度没铺开"。
+
+    所以改成两步相乘：
+      ① 铺刻度：(本条 − 最低) / (最高 − 最低)  → 最低 0、最高 1，中间按比例铺满
+      ② 乘信心：sigmoid(本次最高分)             → 本次整体"到底有没有真相关"
+    ① 保证永远看得出「谁更相关」；② 保证在问"今天天气"这种全不相关的问题时，
+    不会把最高那条硬说成 1.00（那样就是在骗人）。
+    """
+    hi, lo = max(raw), min(raw)
+    if hi == lo:
+        # 所有分数一样（含只有一条候选）：没有相对高低，退回"看它本身够不够相关"
+        return [_score_to_ratio(s) for s in raw]
+
+    conf = _score_to_ratio(hi)                 # 本次召回的"整体信心"
+    return [round((s - lo) / (hi - lo) * conf, 4) for s in raw]
 
 
 def _cost(input_tokens: int, output_tokens: int) -> float:
@@ -102,20 +125,30 @@ def build_context(results: list) -> tuple[str, list]:
         依据是"近因效应"：模型对越靠近结尾的内容记得越牢。
       · 编号跟着摆放顺序走（编号 = 它在资料里排第几），
         所以「编号最大的最相关」。这条规律已经写进 config.SYSTEM_PROMPT 告诉模型了。
+      · 相关度必须【整组一起算】才有高低可言，所以先算好 _ratios，
+        再按编号一条条装配 —— 单条是算不出"相对"的。
     """
     ordered = list(reversed(results))
 
+    raw = [score for _, score in ordered]
+    ratios = _ratios(raw) if all(s is not None for s in raw) else [None] * len(raw)
+
     context = ""
     sources = []
-    for i, (doc, score) in enumerate(ordered, start=1):
+    for idx, (doc, score) in enumerate(ordered):
+        i = idx + 1
         file_name = doc.metadata.get("file_name", "未知文件")
-        page = doc.metadata.get("page", 0) + 1      # 页码从 0 开始数，给人看要 +1
-        context += f"[{i}]（{file_name}·第 {page} 页）\n{doc.page_content}\n\n"
+        # location 是一句由「档案室」填好的位置说明：
+        #   PDF 是「第 3 页」，Word/Markdown 是「一、概述 > 1.2 安装」，TXT 是「第 3–7 段」。
+        # 文案层只认这句话，【不知道】文件原本是什么格式 —— 再加新格式也不用改这里。
+        location = doc.metadata.get("location", "")
+        label = f"{file_name}·{location}" if location else file_name
+        context += f"[{i}]（{label}）\n{doc.page_content}\n\n"
         sources.append({
             "index": i,
             "file": file_name,
-            "page": page,
-            "score": _score_to_ratio(score) if score is not None else None,
+            "location": location,
+            "score": ratios[idx],          # None = 本次没跑重排（前端显示「未重排」）
             "text": doc.page_content,
         })
 
