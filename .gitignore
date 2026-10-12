@@ -19,3 +19,6 @@ fastembed_cache/
 
 # 密钥文件：绝对不能提交，否则密钥会泄露
 secret.py
+
+# 运行时设置：里面存着网页上填的 API 密钥，同样绝对不能提交
+settings.json

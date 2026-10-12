@@ -17,7 +17,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from rag import knowledge, retrieval, generation, session
+import config
+from rag import knowledge, retrieval, generation, session, settings
 
 
 @asynccontextmanager
@@ -113,7 +114,8 @@ def chat(req: ChatRequest):
         yield sse("sources", {"sources": sources, "note": note})
 
         try:
-            for piece in generation.ask_stream(req.session_id, req.question, context):
+            stats = {}          # 空盒子：交给 ask_stream 把这一轮的用量装进去
+            for piece in generation.ask_stream(req.session_id, req.question, context, stats):
                 yield sse("token", {"t": piece})
         except Exception as e:
             # 流已经开始，HTTP 状态码改不了，只能把错误当成一条"事件"发过去。
@@ -124,7 +126,11 @@ def chat(req: ChatRequest):
             yield sse("error", {"detail": f"{type(e).__name__}: {e}"})
             return
 
-        yield sse("done", {})
+        # 流正常结束：把这一轮的「用量」和「记忆占用」一起告诉前端
+        yield sse("done", {
+            "usage": stats,
+            "context": generation.context_status(req.session_id),
+        })
 
     return StreamingResponse(
         event_stream(),
@@ -139,6 +145,63 @@ def chat(req: ChatRequest):
 def reset_session(req: SessionRequest):
     session.reset(req.session_id)
     return {"msg": "会话已清空"}
+
+
+# ============================================================
+# 模型设置：在网页上切换"用哪家大模型"
+# ============================================================
+class SettingsRequest(BaseModel):
+    provider: str = config.CUSTOM_PROVIDER   # 哪一家（预设 id 或 "custom"）
+    base_url: str
+    model: str
+    api_key: str = ""      # 允许留空 = 沿用这家原来那把（本地 Ollama 也本来就不需要）
+
+
+@app.get("/settings")
+def get_settings():
+    """当前设置（脱敏）+ 预设清单。
+
+    注意 public_view() 每家只报"密钥有没有填"，
+    **密钥真值永远不会出现在这个响应里。**
+    """
+    return {
+        "current": settings.public_view(),
+        "presets": config.LLM_PRESETS,
+        "custom_id": config.CUSTOM_PROVIDER,
+    }
+
+
+@app.post("/settings")
+def save_settings(req: SettingsRequest):
+    settings.save(
+        req.provider.strip() or config.CUSTOM_PROVIDER,
+        req.base_url.strip(),
+        req.model.strip(),
+        req.api_key.strip(),
+    )
+    # 换了模型，旧记忆里全是"上一个模型说过的话"，留着只会让它精神分裂
+    session.clear_all()
+    return {"msg": "设置已保存，会话记忆已清空", "current": settings.public_view()}
+
+
+@app.post("/settings/test")
+def test_settings(req: SettingsRequest):
+    """发一句最短的话试试通不通。**只测试，不保存任何东西。**"""
+    # 密钥留空 = 用这一家已经存着的那把（网页上不想重新粘贴时走这条路）
+    saved = settings.get(req.provider.strip()) or {}
+    api_key = req.api_key.strip() or saved.get("api_key", "")
+
+    try:
+        llm = generation.make_llm(req.base_url.strip(), req.model.strip(), api_key)
+        reply = llm.invoke("只回答两个字：你好").content
+        return {"ok": True, "msg": "连接成功，模型回复：" + reply.strip()[:40]}
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        # 本地地址连不上时，给一句人话 —— 否则只会看到干巴巴的 "502"
+        url = req.base_url.strip()
+        if "localhost" in url or "127.0.0.1" in url:
+            msg += "　←　连不上本地服务：是不是没启动 Ollama？"
+        return {"ok": False, "msg": msg}
 
 
 if __name__ == "__main__":

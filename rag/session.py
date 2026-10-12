@@ -49,3 +49,12 @@ def append(session_id: str, question: str, answer: str) -> None:
 def reset(session_id: str) -> None:
     """清空某个会话（页面上「新对话」按钮用）"""
     _SESSIONS.pop(session_id, None)
+
+
+def clear_all() -> None:
+    """清空所有会话。
+
+    换模型的时候必须调它：历史里全是"上一个模型说过的话"，
+    留给新模型看只会让它精神分裂。
+    """
+    _SESSIONS.clear()

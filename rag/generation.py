@@ -22,23 +22,48 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 import config
-from rag import session
+from rag import session, settings
 
 
 class GenerationError(Exception):
     """大模型环节「能被预料到」的错误：重试若干次仍然失败。"""
 
 
-# 大模型：文案自己的工具，负责"把资料写成通顺的答案"。
-# 模型名、密钥、服务地址全部从 config 读 —— 换模型只改 config 一行。
-#
-# 小改进：不写 os.environ["OPENAI_API_KEY"]，而是直接把密钥传给构造函数的参数。
-# 好处是不去污染整个程序的全局环境变量，密钥只在这一处出现。
-LLM = ChatOpenAI(
-    model=config.LLM_MODEL,
-    openai_api_key=config.LLM_API_KEY,
-    openai_api_base=config.LLM_BASE_URL,
-)
+# ============================================================
+# 大模型对象：按需构造，不再是"启动就定死"的常量
+# ============================================================
+def make_llm(base_url: str, model: str, api_key: str):
+    """造一个大模型对象。get_llm() 和网页上的"测试连接"都用它。"""
+    return ChatOpenAI(
+        model=model,
+        # 本地 Ollama 这种不需要密钥的服务，给个占位值就行（不少客户端要求非空）
+        openai_api_key=api_key or "not-needed",
+        openai_api_base=base_url,
+        # 让"流式"返回也带上 token 用量。实测支持，能拿到真实数字。
+        stream_usage=True,
+    )
+
+
+# 缓存：同一个设置只建一次对象，不用每次提问都新建
+_llm_cache = {"key": None, "llm": None}
+
+
+def get_llm():
+    """按「网页上当前选中那一家」的配置拿一个大模型对象；配置一变就自动重建。
+
+    为什么不能像以前那样写 `LLM = ChatOpenAI(...)`？
+    因为那是【模块级常量】—— 启动那一刻就定死了，运行中改不动。
+    想在网页上换模型，就必须改成"每次现查配置、需要时重建"。
+    """
+    s = settings.get()
+    if s is None:
+        raise GenerationError("还没有配置大模型，请到页面下方的「模型设置」里选一家并填好密钥")
+
+    key = (s["base_url"], s["model"], s["api_key"])
+    if _llm_cache["key"] != key:
+        _llm_cache["key"] = key
+        _llm_cache["llm"] = make_llm(s["base_url"], s["model"], s["api_key"])
+    return _llm_cache["llm"]
 
 
 def _score_to_ratio(logit: float) -> float:
@@ -51,6 +76,15 @@ def _score_to_ratio(logit: float) -> float:
     套一个 sigmoid（S 形函数）就好了：正数 → 接近 1，负数 → 接近 0，0 → 0.5。
     """
     return round(1 / (1 + math.exp(-logit)), 4)
+
+
+def _cost(input_tokens: int, output_tokens: int) -> float:
+    """按 config 里的单价，算这次大约花了多少钱（单位：元）。
+
+    单价是"每百万 token 多少钱"，所以要除以 100 万。
+    """
+    return (input_tokens * config.PRICE_INPUT_PER_M
+            + output_tokens * config.PRICE_OUTPUT_PER_M) / 1_000_000
 
 
 # ============================================================
@@ -124,7 +158,7 @@ def _open_stream(messages: list):
     last_err = None
     for attempt in range(1, config.LLM_MAX_RETRY + 1):
         try:
-            stream = LLM.stream(messages)
+            stream = get_llm().stream(messages)
             first = next(stream, None)      # next(..., None)：流是空的也不报错，给个 None
             return stream, first
         except Exception as e:
@@ -136,11 +170,59 @@ def _open_stream(messages: list):
     raise GenerationError(f"大模型调用失败，已重试 {config.LLM_MAX_RETRY} 次：{last_err}")
 
 
-def ask_stream(session_id: str, question: str, context: str):
-    """流式生成答案，并在结束时把这一轮记进会话记忆。一次 yield 一小段文字。
+def _fill_stats(stats: dict, messages: list, answer: str, last_chunk) -> None:
+    """把这一轮的用量和花费装进 stats，并在终端打一行。
+
+    优先用 API 返回的**真实用量**；万一拿不到，就按字符数粗估，并标记 estimated=True
+    （宁可标清楚"这是估算"，也不假装精确）。
+    """
+    usage = getattr(last_chunk, "usage_metadata", None) if last_chunk is not None else None
+
+    if usage:
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        estimated = False
+    else:
+        # 兜底估算：prompt 的字符数已经把「系统提示词 + 历史 + 资料 + 问题」全算进去了
+        prompt_chars = sum(len(m.content) for m in messages)
+        input_tokens = int(prompt_chars * config.TOKENS_PER_CHAR)
+        output_tokens = int(len(answer) * config.TOKENS_PER_CHAR)
+        estimated = True
+
+    cost = _cost(input_tokens, output_tokens)
+    stats.update(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost=round(cost, 6),
+        estimated=estimated,
+    )
+
+    print(f"[用量] 输入 {input_tokens} · 输出 {output_tokens} tokens "
+          f"· 约 ¥{cost:.4f}" + ("（估算值）" if estimated else ""))
+
+
+def context_status(session_id: str) -> dict:
+    """当前会话的「记忆占用」情况，给前端做上下文提醒用。
+
+    full=True 表示记忆已经装满 —— 再聊下去，最早的那一轮就会被挤出去。
+    """
+    used = len(session.get(session_id))
+    return {
+        "used": used,
+        "max": config.MAX_HISTORY_MESSAGES,
+        "full": used >= config.MAX_HISTORY_MESSAGES,
+    }
+
+
+def ask_stream(session_id: str, question: str, context: str, stats: dict):
+    """流式生成答案；结束时把这一轮记进会话记忆，并把用量写进 stats。
 
     注意：这是个【生成器】—— 调用它不会立刻跑完，而是每 yield 一次就交给上层一次。
     上层（main.py）负责把每一小段包成 SSE 推给浏览器。
+
+    stats 是由调用方传进来的一个**空字典**（相当于"递进来一个空盒子"），
+    函数跑完会往里装：{"input_tokens":…, "output_tokens":…, "cost":…, "estimated":…}
+    这样就不必为了"多返回一个数"去改生成器一次只吐一小段的形状。
     """
     history = session.get(session_id)               # 取出这个会话之前的问答
     messages = build_messages(question, context, history)
@@ -148,14 +230,18 @@ def ask_stream(session_id: str, question: str, context: str):
     stream, first = _open_stream(messages)
 
     answer = ""
+    last_chunk = None
     # chain([第一块], 剩下的流) = 把两段接成一段，这样刚才那一块不用丢掉重来
     for chunk in chain([first], stream):
         if chunk is None:                           # 空流的情况
             continue
+        last_chunk = chunk                          # 留着它 —— 用量挂在"最后一块"上
         piece = chunk.content
         if piece:
             answer += piece
             yield piece                             # ← 吐给上层
+
+    _fill_stats(stats, messages, answer, last_chunk)
 
     # 只有完整生成完（没有中途报错）才记进记忆 —— 半截答案记进去只会污染上下文
     if answer:

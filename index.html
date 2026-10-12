@@ -171,6 +171,46 @@
     border: 1px solid var(--border); border-radius: 6px;
   }
   .btn-ghost:hover { background: var(--bg); color: var(--text); }
+
+  /* 流结束时显示的一行小字：本轮用量 + 记忆占用 */
+  .ctx-line {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: var(--muted-light);
+    min-height: 18px;              /* 先占好位置，出现时不跳一下 */
+  }
+  .ctx-line.full { color: #b45309; }   /* 记忆装满了 → 换成提醒色 */
+
+  /* ============ 「模型设置」折叠面板 ============ */
+  .settings summary {
+    cursor: pointer;
+    font-size: 15px; font-weight: 500;
+    display: flex; align-items: center; gap: 8px;
+    list-style: none;
+  }
+  .settings summary::-webkit-details-marker { display: none; }   /* 去掉浏览器自带的三角 */
+  .settings summary::before {
+    content: '▸'; color: var(--muted); transition: transform .15s;
+  }
+  .settings[open] summary::before { transform: rotate(90deg); }
+  .settings summary .cur {
+    margin-left: auto; font-size: 12px; color: var(--muted-light); font-weight: 400;
+  }
+  .settings-body { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .lbl { font-size: 13px; color: var(--muted); width: 64px; flex: none; }
+  select, input[type="password"] {
+    flex: 1; min-width: 0; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 8px; font: inherit;
+    outline: none; background: var(--card); color: var(--text);
+  }
+  select:focus, input[type="password"]:focus { border-color: var(--brand); }
+  .hint { font-size: 12px; color: var(--muted-light); margin: 0; }
+  .btn-line {
+    padding: 10px 18px; font-size: 14px; font-weight: 400;
+    color: var(--text); background: var(--card);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .btn-line:hover { background: var(--bg); }
 </style>
 </head>
 <body>
@@ -198,6 +238,38 @@
         <input type="text" id="question" placeholder="输入你的问题，例如：这份文档的核心结论是什么？" autocomplete="off">
         <button type="submit" id="askBtn">提问</button>
       </form>
+      <p class="ctx-line" id="ctxLine"></p>
+    </section>
+
+    <section class="card">
+      <details class="settings">
+        <summary>模型设置<span class="cur" id="curModel"></span></summary>
+        <div class="settings-body">
+          <div class="row">
+            <label class="lbl" for="presetSel">服务商</label>
+            <select id="presetSel"></select>
+          </div>
+          <p class="hint" id="presetHint"></p>
+          <div class="row">
+            <label class="lbl" for="setBaseUrl">接口地址</label>
+            <input type="text" id="setBaseUrl" placeholder="https://...">
+          </div>
+          <div class="row">
+            <label class="lbl" for="setModel">模型名</label>
+            <input type="text" id="setModel" placeholder="例如 glm-4.7-flash">
+          </div>
+          <div class="row">
+            <label class="lbl" for="setApiKey">API Key</label>
+            <input type="password" id="setApiKey" autocomplete="off" placeholder="粘贴你的密钥">
+          </div>
+          <p class="hint">密钥只保存在你本机的 settings.json 里（已排除在 git 之外），网页上永远不会把它显示出来。</p>
+          <div class="row">
+            <button type="button" id="testBtn" class="btn-line">测试连接</button>
+            <button type="button" id="saveBtn">保存</button>
+          </div>
+          <p class="status" id="settingsStatus"></p>
+        </div>
+      </details>
     </section>
   </div>
 
@@ -211,6 +283,7 @@
   const messages = document.getElementById('messages');
   const docList = document.getElementById('docList');
   const newChatBtn = document.getElementById('newChatBtn');
+  const ctxLine = document.getElementById('ctxLine');
 
   // 会话编号：本次谈话的"身份证"，后端靠它把同一会话的前几轮串起来。
   // crypto.randomUUID() 生成一个几乎不可能重复的字符串；localhost 属于"安全上下文"，可用。
@@ -367,6 +440,26 @@
     return el;
   }
 
+  // 流结束时后端会发一条 done，里面带着「本轮用量」和「记忆占用」
+  function renderDone(data) {
+    const parts = [];
+    const u = data && data.usage;
+    const c = data && data.context;
+
+    if (u && typeof u.input_tokens === 'number') {
+      const yuan = (typeof u.cost === 'number') ? ' · 约 ¥' + u.cost.toFixed(4) : '';
+      parts.push('本轮用量：输入 ' + u.input_tokens + ' · 输出 ' + u.output_tokens
+                 + ' tokens' + yuan + (u.estimated ? '（估算）' : ''));
+    }
+    if (c) {
+      parts.push('记忆占用 ' + c.used + '/' + c.max + ' 条'
+                 + (c.full ? ' · 更早的对话已不再参与回答' : ''));
+    }
+
+    ctxLine.textContent = parts.join('　·　');
+    ctxLine.className = 'ctx-line' + (c && c.full ? ' full' : '');
+  }
+
   // ============================================================
   // 提问：发出去之后不再等一整份 JSON，而是边收边显示
   // ============================================================
@@ -425,6 +518,8 @@
             bubble.classList.add('streaming'); // 重复加也不会出问题
             fullText += msg.data.t;
             answerEl.textContent = fullText;   // 逐字追加，这就是"流式"
+          } else if (msg.event === 'done') {
+            renderDone(msg.data);              // 更新「用量 + 记忆占用」那行小字
           } else if (msg.event === 'error') {
             problem = msg.data.detail;         // 中途出错，流里会发一条 error 事件过来
           }
@@ -462,6 +557,142 @@
       // 清不掉也不要紧：就算后端还留着，它迟早会被 MAX_SESSIONS 挤掉
     }
   });
+
+  // ============================================================
+  // 模型设置：读 / 存 / 测试
+  // ============================================================
+  const presetSel = document.getElementById('presetSel');
+  const presetHint = document.getElementById('presetHint');
+  const setBaseUrl = document.getElementById('setBaseUrl');
+  const setModel = document.getElementById('setModel');
+  const setApiKey = document.getElementById('setApiKey');
+  const testBtn = document.getElementById('testBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const settingsStatus = document.getElementById('settingsStatus');
+  const curModel = document.getElementById('curModel');
+  let settingsData = null;    // 后端返回的脱敏设置
+
+  function findPreset(pid) {
+    if (!settingsData) return null;
+    return settingsData.presets.find(function (p) { return p.id === pid; }) || null;
+  }
+
+  // 把"某一家"的配置填进表单 —— 方案 A 的核心：
+  // 切到哪家，就把它存过的地址/模型/密钥状态带出来
+  function fillForm(pid) {
+    if (!settingsData) return;
+    const saved = settingsData.current.providers[pid] || null;   // 这家存过的
+    const preset = findPreset(pid);
+
+    if (saved) {
+      setBaseUrl.value = saved.base_url || '';
+      setModel.value = saved.model || '';
+    } else if (preset) {
+      setBaseUrl.value = preset.base_url;   // 没存过就用预设默认值打底
+      setModel.value = preset.model;
+    } else {
+      setBaseUrl.value = '';
+      setModel.value = '';
+    }
+
+    // 密钥永远不填进来（后端根本不回传真值）。留空 = 不改这把。
+    setApiKey.value = '';
+    setApiKey.placeholder = (saved && saved.has_key)
+      ? '已配置（留空表示不修改）'
+      : '这家还没配密钥，请粘贴';
+    presetHint.textContent = preset ? preset.hint : '手填地址和模型名即可，配置会存到「自定义」里';
+  }
+
+  function collect() {
+    return {
+      provider: presetSel.value,
+      base_url: setBaseUrl.value.trim(),
+      model: setModel.value.trim(),
+      api_key: setApiKey.value.trim(),
+    };
+  }
+
+  function setSetStatus(text, type) {
+    settingsStatus.textContent = text;
+    settingsStatus.className = 'status' + (type ? ' ' + type : '');
+  }
+
+  async function loadSettings() {
+    try {
+      const res = await fetch('/settings');
+      settingsData = await res.json();
+
+      presetSel.innerHTML = '';
+      settingsData.presets.forEach(function (p) {
+        const opt = document.createElement('option');
+        opt.value = p.id;                 // value 直接放"门牌号"
+        opt.textContent = p.name;
+        presetSel.appendChild(opt);
+      });
+      const custom = document.createElement('option');
+      custom.value = settingsData.custom_id;
+      custom.textContent = '（自定义）';
+      presetSel.appendChild(custom);
+
+      // 关键修复：按"现在用的是哪家"反选中下拉项，而不是永远停在第一项
+      const cur = settingsData.current.current;
+      presetSel.value = findPreset(cur) ? cur : settingsData.custom_id;
+
+      fillForm(presetSel.value);
+
+      const curCfg = settingsData.current.providers[cur] || null;
+      curModel.textContent = (curCfg ? curCfg.model : '未配置')
+        + (curCfg && curCfg.has_key ? '' : '（未配密钥）');
+    } catch (e) {
+      setSetStatus('读取设置失败：' + e.message, 'err');
+    }
+  }
+
+  // 换一家 → 把这家存过的配置带出来（这就是方案 A 的核心体验）
+  presetSel.addEventListener('change', function () {
+    fillForm(presetSel.value);
+    setSetStatus('');
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    setSetStatus('正在保存…');
+    try {
+      const res = await fetch('/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(collect()),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '保存失败');
+      setSetStatus('✓ ' + data.msg, 'ok');
+      loadSettings();
+    } catch (e) {
+      setSetStatus('保存失败：' + e.message, 'err');
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  testBtn.addEventListener('click', async () => {
+    testBtn.disabled = true;
+    setSetStatus('正在测试连接…（免费模型高峰期可能要等几秒）');
+    try {
+      const res = await fetch('/settings/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(collect()),
+      });
+      const data = await res.json();
+      setSetStatus((data.ok ? '✓ ' : '✗ ') + data.msg, data.ok ? 'ok' : 'err');
+    } catch (e) {
+      setSetStatus('测试失败：' + e.message, 'err');
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+
+  loadSettings();   // 页面一打开就载入当前设置
 
   // 读取知识库里已有的文件，显示成一张清单
   async function loadDocuments() {

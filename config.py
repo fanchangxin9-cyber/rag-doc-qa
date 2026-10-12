@@ -24,11 +24,15 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 # ============================================================
 DB_PATH = "./faiss_db"              # 向量库存放的文件夹（多份文档会累积在这里）
 CACHE_DIR = "./fastembed_cache"     # 模型文件缓存目录（存过一次就不用再下载）
+SETTINGS_PATH = "./settings.json"   # 网页上填的「模型设置」存这里（已 gitignore，含密钥）
 
 # ============================================================
 # 二、模型
 # ============================================================
-LLM_MODEL = "deepseek-chat"                    # 大模型：负责"开口说话"
+LLM_MODEL = "deepseek-flash"                   # 大模型：负责"开口说话"
+                                               # DeepSeek 官方支持的模型名（API 报错里自己列出来的）：
+                                               #   deepseek-flash   —— 快、便宜（我们早期的 deepseek-chat 就指向它）
+                                               #   deepseek-v4-pro  —— 更强、更贵
 LLM_BASE_URL = "https://api.deepseek.com"      # 大模型服务地址
 EMBED_MODEL = "BAAI/bge-small-zh-v1.5"         # 向量模型：负责"把文字变成数字"
 RERANK_MODEL = "BAAI/bge-reranker-base"        # 重排模型：负责"精排"
@@ -70,3 +74,56 @@ SYSTEM_PROMPT = (
 # ============================================================
 MAX_HISTORY_MESSAGES = 6    # 每个会话只记最近这么多条消息（一问一答算 2 条，即约 3 轮）
 MAX_SESSIONS = 200          # 最多同时记多少个会话，超了就丢最早的（防止内存无限涨）
+
+# ============================================================
+# 八、用量与花费
+# ============================================================
+# ⚠️ 单价会变！请到官方价格页核对后改成最新值：
+#     https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+# 单位：元 / 每百万 token
+#
+# 下面填的是【偏保守（偏高）的旧价】—— 宁可让你高估，也别让你低估账单。
+# 改小它只会让显示的数字变小，不会真的少扣钱。
+PRICE_INPUT_PER_M = 2.0     # 输入（缓存未命中）
+PRICE_OUTPUT_PER_M = 8.0    # 输出
+
+# 万一拿不到真实用量，按字符数粗估时的换算比例：中文大约 1 个字 ≈ 0.6 个 token
+TOKENS_PER_CHAR = 0.6
+
+# ============================================================
+# 九、模型预设（网页上「模型设置」的下拉选项）
+# ============================================================
+# id 是这一家的"门牌号"，settings.json 用它来分坑位存密钥。
+# 不要随便改 id —— 改了等于把人家原来存的密钥弄丢了。
+#
+# base_url 和 model 是"选了就自动填这两样"；api_key 一律由用户自己在网页上填，
+# 不写在这里（写了就等于把密钥摊在代码里）。
+LLM_PRESETS = [
+    {
+        "id": "zhipu",
+        "name": "智谱 GLM-4.7-Flash（永久免费）",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4.7-flash",
+        "hint": "去 open.bigmodel.cn 注册，在「API Keys」页面创建一个",
+    },
+    {
+        "id": "deepseek",
+        "name": "DeepSeek（付费，按 token 计费）",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
+        "hint": "模型名只能是 deepseek-flash 或 deepseek-v4-pro；密钥去 platform.deepseek.com 创建",
+    },
+    {
+        "id": "ollama",
+        "name": "本地 Ollama（完全免费、可离线）",
+        "base_url": "http://localhost:11434/v1",
+        "model": "qwen2.5:7b",
+        "hint": "先装 Ollama 并执行 ollama pull qwen2.5:7b；这个地址不需要密钥",
+    },
+]
+
+# 「自定义」也是一个坑位：手填了不在预设里的地址/模型名时，配置存在这个 id 下
+CUSTOM_PROVIDER = "custom"
+
+# 第一次运行（还没有 settings.json）时默认用哪一家
+DEFAULT_PROVIDER = "deepseek"
