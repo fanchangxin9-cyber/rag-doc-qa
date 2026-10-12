@@ -3,19 +3,21 @@ main.py —— 前台
 
 职责只有一个：接客。
   收到上传  → 转交档案室（knowledge）
-  收到提问  → 依次转交档案室、情报组、文案，然后把结果拼起来返回
+  收到提问  → 依次转交档案室、情报组、文案，把结果包成 SSE 流推回去
   管理知识库 → 转交档案室
 
 所有业务逻辑都在 rag/ 里。这个文件应该越薄越好 ——
 薄到"想看业务怎么实现的，根本不用打开这个文件"。
 """
 
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
-from rag import knowledge, retrieval, generation
+from rag import knowledge, retrieval, generation, session
 
 
 @asynccontextmanager
@@ -32,15 +34,15 @@ app = FastAPI(title="RAG文档问答服务", lifespan=lifespan)
 # ============================================================
 # 错误翻译层
 # ============================================================
-# rag 层只负责说"出什么事了"（抛 KnowledgeError / GenerationError），
-# 至于该回给浏览器 400 还是 502，是网页这一层的事 —— 翻译工作统一放在这里。
+# rag 层只负责说"出什么事了"，至于该回给浏览器什么状态码，是网页这一层的事。
+#
+# 注意：GenerationError（大模型挂了）【不】在这里处理。
+# 因为它必然发生在"流已经开始之后"，那时 HTTP 状态码早就发出去了、改不了，
+# 只能在流里面发一条 event: error —— 见下面 chat() 里那段 try/except。
 @app.exception_handler(knowledge.KnowledgeError)
-@app.exception_handler(generation.GenerationError)
-def handle_business_error(request, exc):
+def handle_knowledge_error(request, exc):
     # 知识库的问题（文件重复、读不出文字）→ 400，是"你的请求有问题"
-    # 大模型的问题（重试仍失败）      → 502，是"我依赖的下游服务有问题"
-    status = 502 if isinstance(exc, generation.GenerationError) else 400
-    return JSONResponse(status_code=status, content={"detail": str(exc)})
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 # ============================================================
@@ -71,28 +73,72 @@ def delete_document(file: str):
 
 
 # ============================================================
-# 提问：把三个模块串成一条线
+# 提问：把三个模块串起来，边生成边推给浏览器
 # ============================================================
-# 这里用同步的 def 而不是 async def：因为里面全是"阻塞式"的调用
-# （读库、jieba 分词、重排、调大模型）。FastAPI 会把同步接口丢到线程池里跑，
-# 不会卡住其它请求；写成 async 反而会把整个服务堵住。
-@app.get("/query")
-def query(question: str):
-    # ① 档案室：取出向量库和全库片段
+class ChatRequest(BaseModel):
+    question: str       # 用户这一轮的问题
+    session_id: str     # 会话编号，前端生成并一直带着
+
+
+class SessionRequest(BaseModel):
+    session_id: str
+
+
+def sse(event: str, data: dict) -> str:
+    """把一段数据包成 SSE 的格式：event 行 + data 行 + 空行。
+
+    那个空行是【分隔符】—— 少了它，两段数据会被浏览器当成一段。
+    """
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    # 守卫：知识库为空 —— 此刻"还没开始流"，所以还能正常返回 400
     db = knowledge.load_db()
     if db is None:
         raise HTTPException(status_code=400, detail="知识库还是空的，请先上传一份 PDF")
+
+    # ①② 检索 + 拼资料（情报组和文案纯函数，用法和改造前一样）
     corpus = knowledge.all_chunks(db)
-
-    # ② 情报组：两路召回 + 融合 + 重排 → [(片段, 分数)]，最相关在前
-    results, rerank_used = retrieval.retrieve(db, question, corpus)
-
-    # ③ 文案：拼提示词，再交给大模型写答案
-    prompt, sources = generation.make_prompt(question, results)
-    answer = generation.ask(prompt)
-
+    results, rerank_used = retrieval.retrieve(db, req.question, corpus)
+    context, sources = generation.build_context(results)
     note = "" if rerank_used else "重排模型未就绪，本次按向量检索结果作答"
-    return {"answer": answer, "sources": sources, "note": note}
+
+    # 这是个【同步生成器】：FastAPI 会一段一段地把它取出来推给浏览器，
+    # 而不是等它全部跑完。这就是"流式"的实现方式。
+    def event_stream():
+        # 先把来源推过去 —— 前端收到就能建好卡片，
+        # 后面答案里流出 [n] 时立刻能连上跳转目标
+        yield sse("sources", {"sources": sources, "note": note})
+
+        try:
+            for piece in generation.ask_stream(req.session_id, req.question, context):
+                yield sse("token", {"t": piece})
+        except Exception as e:
+            # 流已经开始，HTTP 状态码改不了，只能把错误当成一条"事件"发过去。
+            #
+            # 这里特意兜住【所有】异常，而不是只兜 GenerationError：
+            # 中途断网 / 超时抛的是普通网络异常，不兜住的话浏览器会看到
+            # 答案莫名其妙断在半截，而且完全没有提示。
+            yield sse("error", {"detail": f"{type(e).__name__}: {e}"})
+            return
+
+        yield sse("done", {})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        # no-cache：别让浏览器或中间的代理把这条流缓存住
+        # X-Accel-Buffering: no：叫 nginx 之类的反向代理别攒着，来一点转一点
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/session/reset")
+def reset_session(req: SessionRequest):
+    session.reset(req.session_id)
+    return {"msg": "会话已清空"}
 
 
 if __name__ == "__main__":

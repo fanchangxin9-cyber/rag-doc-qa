@@ -1,23 +1,28 @@
 """
 generation.py —— 文案
 
-手里拿到「问题 + 几段资料」，要干两件事：
-  ① 把资料编上号、按相关度升序摆好，拼成一段提示词
-  ② 交给大模型写答案；写失败就重试
+手里拿到「问题 + 几段资料」，要干三件事：
+  ① 把资料编上号、按相关度升序摆好            → build_context（纯函数）
+  ② 把「系统规则 + 历史问答 + 本轮资料问题」组起来 → build_messages（纯函数）
+  ③ 交给大模型，边生成边往外吐，并记住这一轮    → ask_stream（生成器）
 
-对外只露两个函数：make_prompt、ask。
+对外只露三个函数：build_context / build_messages / ask_stream。
 
-注意：这个文件不 import knowledge，也不 import retrieval。
+注意：它只 import session（会话记忆这个"工具"）和 config，
+不 import knowledge，也不 import retrieval。
   —— 想看"答案是怎么拼出来的"，只看这一个文件就够了；
-  —— 将来想加流式输出、多轮记忆，也主要改这里，碰不到检索那边。
+  —— 将来想加别的呈现方式，也主要改这里，碰不到检索那边。
 """
 
 import math
 import time
+from itertools import chain
 
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 import config
+from rag import session
 
 
 class GenerationError(Exception):
@@ -48,18 +53,22 @@ def _score_to_ratio(logit: float) -> float:
     return round(1 / (1 + math.exp(-logit)), 4)
 
 
-def make_prompt(question: str, results: list) -> tuple[str, list]:
-    """把「问题 + 检索结果」拼成一段提示词，并整理出来源清单。
+# ============================================================
+# 一、纯函数：拼资料、组消息
+#     —— 不联网、不写文件，只靠"进来的参数"算结果，所以最好测
+# ============================================================
+def build_context(results: list) -> tuple[str, list]:
+    """把 [(片段, 相关度分数)] 拼成带编号的资料文本 + 来源清单。
 
-    收：问题，以及 [(片段, 相关度分数)] —— 最相关的排在前面
-    吐：(完整提示词, 来源清单)，来源清单要原样发给前端渲染
+    收：最相关的排在前面
+    吐：(资料文本, 来源清单)，来源清单要原样发给前端渲染
+
+    两个关键约定：
+      · 搭车改动：按相关度【升序】摆放 —— 最相关的放到最后面，紧挨着问题。
+        依据是"近因效应"：模型对越靠近结尾的内容记得越牢。
+      · 编号跟着摆放顺序走（编号 = 它在资料里排第几），
+        所以「编号最大的最相关」。这条规律已经写进 config.SYSTEM_PROMPT 告诉模型了。
     """
-    # 搭车改动：按相关度【升序】摆放 —— 把最相关的放到最后面，紧挨着问题。
-    # 依据是"近因效应"：模型对越靠近结尾的内容记得越牢。
-    # results 本来是最相关在前，reversed 一下就翻过来了。
-    #
-    # 编号跟着摆放顺序走（编号 = 它在资料里排第几），
-    # 所以「编号最大的最相关」。这条规律已经写进 config.SYSTEM_PROMPT 告诉模型了。
     ordered = list(reversed(results))
 
     context = ""
@@ -76,20 +85,48 @@ def make_prompt(question: str, results: list) -> tuple[str, list]:
             "text": doc.page_content,
         })
 
-    prompt = f"{config.SYSTEM_PROMPT}\n\n资料：\n{context}问题：{question}"
-    return prompt, sources
+    return context, sources
 
 
-def ask(prompt: str) -> str:
-    """把提示词交给大模型。
+def build_messages(question: str, context: str, history: list) -> list:
+    """组装「带角色」的消息列表 —— 这是多轮记忆的载体。
 
-    失败就重试（等 0.5 秒、1 秒、……），重试用完仍失败才抛错。
-    为什么要重试？网络抖动、服务限流这类"抽风型"故障，往往等一下自己就好了。
+    结构：[系统规则] + [历史的一问一答…] + [本轮：资料 + 问题]
+
+    为什么必须用消息列表、不能像以前那样拼成一个字符串？
+    因为「角色」（system / user / assistant）是模型区分"谁说的话"的唯一依据。
+    全塞进一个字符串，模型就分不清哪句话是它自己上一轮说过的。
+    """
+    messages = [SystemMessage(content=config.SYSTEM_PROMPT)]
+
+    for m in history:
+        cls = HumanMessage if m["role"] == "user" else AIMessage
+        messages.append(cls(content=m["content"]))
+
+    messages.append(HumanMessage(content=f"资料：\n{context}问题：{question}"))
+    return messages
+
+
+# ============================================================
+# 二、带副作用的：建立流（含重试）、边吐边记
+# ============================================================
+def _open_stream(messages: list):
+    """建立流，并"逼"它立刻吐出第一块。
+
+    为什么不能只写 LLM.stream(messages) 就完事？
+    因为那是个"懒"生成器 —— 光调用它不会真正联网，直到你开始取数据才连。
+    所以必须立刻 next() 一下，把"连不上 / 超时 / 密钥错"这类问题提前逼出来。
+
+    为什么重试只能在这一步做？
+    因为一旦已经有字发给用户了，重来一遍会把内容重复输出。
+    流式下没法"整段重试"，这是流式的固有取舍。
     """
     last_err = None
     for attempt in range(1, config.LLM_MAX_RETRY + 1):
         try:
-            return LLM.invoke(prompt).content
+            stream = LLM.stream(messages)
+            first = next(stream, None)      # next(..., None)：流是空的也不报错，给个 None
+            return stream, first
         except Exception as e:
             last_err = e
             # 最后一次就不用再等了 —— 后面已经没有"下一次"
@@ -97,3 +134,29 @@ def ask(prompt: str) -> str:
                 time.sleep(config.LLM_RETRY_WAIT * attempt)
 
     raise GenerationError(f"大模型调用失败，已重试 {config.LLM_MAX_RETRY} 次：{last_err}")
+
+
+def ask_stream(session_id: str, question: str, context: str):
+    """流式生成答案，并在结束时把这一轮记进会话记忆。一次 yield 一小段文字。
+
+    注意：这是个【生成器】—— 调用它不会立刻跑完，而是每 yield 一次就交给上层一次。
+    上层（main.py）负责把每一小段包成 SSE 推给浏览器。
+    """
+    history = session.get(session_id)               # 取出这个会话之前的问答
+    messages = build_messages(question, context, history)
+
+    stream, first = _open_stream(messages)
+
+    answer = ""
+    # chain([第一块], 剩下的流) = 把两段接成一段，这样刚才那一块不用丢掉重来
+    for chunk in chain([first], stream):
+        if chunk is None:                           # 空流的情况
+            continue
+        piece = chunk.content
+        if piece:
+            answer += piece
+            yield piece                             # ← 吐给上层
+
+    # 只有完整生成完（没有中途报错）才记进记忆 —— 半截答案记进去只会污染上下文
+    if answer:
+        session.append(session_id, question, answer)

@@ -10,6 +10,7 @@
     --card: #ffffff;
     --text: #1f2328;
     --muted: #6b7280;
+    --muted-light: #9ca3af;
     --border: #e5e7eb;
     --brand: #16a34a;
     --brand-dark: #15803d;
@@ -101,7 +102,7 @@
   .source-hd { font-size: 13px; font-weight: 500; color: var(--brand-dark); margin-bottom: 4px; }
   .source-text { font-size: 13px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
 
-  /* ============ 本次升级新增的样式 ============ */
+  /* ============ 引用溯源相关样式 ============ */
 
   /* 答案里的引用标签，例如 [1] */
   .cite {
@@ -119,7 +120,7 @@
 
   /* 来源原文默认折成 3 行，"展开全文"按钮切换 */
   .source-text.clamped {
-    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
   }
   .source-toggle {
     margin-top: 6px; padding: 2px 10px; font-size: 12px; color: var(--muted);
@@ -133,12 +134,49 @@
     font-size: 12px; color: #b45309; background: #fffbeb;
     border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px;
   }
+
+  /* ============ 本次「流式 + 多轮对话」新增的样式 ============ */
+
+  /* 正在流式输出时，答案末尾挂一个闪烁光标 */
+  .msg.bot.streaming .answer::after {
+    content: '▍';
+    color: var(--brand);
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* 「思考中…」：等模型第一个字时显示的浅色提示，三个点轮流亮 */
+  .thinking {
+    color: var(--muted-light);          /* 浅色，不抢眼 */
+    font-size: 14px;
+    user-select: none;
+  }
+  .thinking .dot {
+    opacity: .25;                       /* 暗着的状态 */
+    animation: dotFade 1.4s infinite;
+  }
+  /* nth-child 只数"元素"，文字节点不算 —— 所以 1/2/3 正好是三个点 */
+  .thinking .dot:nth-child(2) { animation-delay: .2s; }
+  .thinking .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes dotFade {
+    0%, 60%, 100% { opacity: .25; }     /* 大部分时间是暗的 */
+    30%           { opacity: 1; }       /* 亮一下就过去，形成"跑马灯"感 */
+  }
+
+  /* 「新对话」按钮：次要样式，别抢主按钮的视觉 */
+  .btn-ghost {
+    margin-left: auto;                 /* h2 是 flex，这一下把它推到最右边 */
+    padding: 4px 12px; font-size: 13px; font-weight: 400;
+    color: var(--muted); background: var(--card);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  .btn-ghost:hover { background: var(--bg); color: var(--text); }
 </style>
 </head>
 <body>
   <div class="wrap">
     <h1>RAG 文档问答</h1>
-    <p class="lead">上传一份或多份 PDF，然后基于它们的内容提问。答案会标注引用编号，点编号可以跳回原文核对。</p>
+    <p class="lead">上传一份或多份 PDF，然后基于它们的内容提问。答案会一个字一个字显示出来，并标注引用编号——点编号可以跳回原文核对。同一个会话里可以接着追问。</p>
 
     <section class="card">
       <h2><span class="step">1</span>上传文档</h2>
@@ -151,7 +189,10 @@
     </section>
 
     <section class="card">
-      <h2><span class="step">2</span>提问</h2>
+      <h2>
+        <span class="step">2</span>提问
+        <button id="newChatBtn" type="button" class="btn-ghost">新对话</button>
+      </h2>
       <div id="messages"><p class="empty">还没有对话。先上传文档，然后在这里提问。</p></div>
       <form class="row" id="askForm">
         <input type="text" id="question" placeholder="输入你的问题，例如：这份文档的核心结论是什么？" autocomplete="off">
@@ -169,6 +210,11 @@
   const questionInput = document.getElementById('question');
   const messages = document.getElementById('messages');
   const docList = document.getElementById('docList');
+  const newChatBtn = document.getElementById('newChatBtn');
+
+  // 会话编号：本次谈话的"身份证"，后端靠它把同一会话的前几轮串起来。
+  // crypto.randomUUID() 生成一个几乎不可能重复的字符串；localhost 属于"安全上下文"，可用。
+  let sessionId = crypto.randomUUID();
 
   function setStatus(text, type) {
     uploadStatus.textContent = text;
@@ -289,6 +335,134 @@
     return box;
   }
 
+  // ============================================================
+  // 读 SSE 流：把一帧 "event: xxx\ndata: {...}" 拆成 {event, data}
+  // ============================================================
+  function parseFrame(frame) {
+    let event = 'message';
+    const dataLines = [];
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+    }
+    if (dataLines.length === 0) return null;
+    return { event: event, data: JSON.parse(dataLines.join('\n')) };
+  }
+
+  // ============================================================
+  // 「思考中…」提示条
+  // ============================================================
+  // 三个点单独用元素包起来，才能让它们"轮流亮"。
+  // （如果用 innerHTML 拼一串字符，就没法单独控制每一个点。）
+  function makeThinking() {
+    const el = document.createElement('div');
+    el.className = 'thinking';
+    el.appendChild(document.createTextNode('思考中'));
+    for (let i = 0; i < 3; i++) {
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.textContent = '.';
+      el.appendChild(dot);
+    }
+    return el;
+  }
+
+  // ============================================================
+  // 提问：发出去之后不再等一整份 JSON，而是边收边显示
+  // ============================================================
+  async function ask(q) {
+    addMessage(q, 'user');
+
+    // 先摆好气泡：一个"思考中"提示 + 一个空的答案区，等着往里塞字
+    const bubble = addMessage('', 'bot');
+    const thinkingEl = makeThinking();
+    bubble.appendChild(thinkingEl);
+    const answerEl = document.createElement('div');
+    answerEl.className = 'answer';
+    bubble.appendChild(answerEl);
+    bubble.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    let sourcesBox = null;
+    let fullText = '';
+    let problem = '';
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, session_id: sessionId }),
+      });
+
+      // 只有"还没开始流"的错误才会走到这里（比如知识库是空的）
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || '请求失败');
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE 用空行分隔一条条消息，所以按 \n\n 切开
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          const msg = parseFrame(frame);
+          if (!msg) continue;
+
+          if (msg.event === 'sources') {
+            sourcesBox = renderSources(bubble, msg.data.sources, msg.data.note);
+          } else if (msg.event === 'token') {
+            // 第一个字到了：撤掉"思考中"，换上闪烁光标
+            thinkingEl.remove();               // 已经移掉了再调一次也没事
+            bubble.classList.add('streaming'); // 重复加也不会出问题
+            fullText += msg.data.t;
+            answerEl.textContent = fullText;   // 逐字追加，这就是"流式"
+          } else if (msg.event === 'error') {
+            problem = msg.data.detail;         // 中途出错，流里会发一条 error 事件过来
+          }
+        }
+      }
+    } catch (err) {
+      problem = err.message;
+    } finally {
+      // 不管成功、失败还是中途卡住，这两样都得撤掉
+      thinkingEl.remove();
+      bubble.classList.remove('streaming');    // 光标
+    }
+
+    if (problem) fullText += (fullText ? '\n\n' : '') + '[出错] ' + problem;
+    if (!fullText) fullText = '（模型没有返回任何内容）';
+
+    // 流结束，整体重渲染一次 —— 这一步才把 [n] 变成可点标签。
+    // 为什么不在流的过程中就做？因为一边收字一边重排 DOM 又复杂又容易出错。
+    if (sourcesBox) renderAnswer(answerEl, fullText, sourcesBox);
+    else answerEl.textContent = fullText;
+  }
+
+  // 「新对话」：换一个新编号，页面清空
+  newChatBtn.addEventListener('click', async () => {
+    const oldId = sessionId;
+    sessionId = crypto.randomUUID();
+    messages.innerHTML = '<p class="empty">还没有对话。先上传文档，然后在这里提问。</p>';
+    try {
+      await fetch('/session/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: oldId }),
+      });
+    } catch (e) {
+      // 清不掉也不要紧：就算后端还留着，它迟早会被 MAX_SESSIONS 挤掉
+    }
+  });
+
   // 读取知识库里已有的文件，显示成一张清单
   async function loadDocuments() {
     try {
@@ -366,28 +540,10 @@
     const q = questionInput.value.trim();
     if (!q) return;
 
-    addMessage(q, 'user');
     questionInput.value = '';
     askBtn.disabled = true;
-
-    // 先摆一个气泡和一个"答案区"，等后端回话
-    const bubble = addMessage('', 'bot');
-    const answerEl = document.createElement('div');
-    answerEl.className = 'answer';
-    answerEl.textContent = '思考中…';
-    bubble.appendChild(answerEl);
-
     try {
-      const res = await fetch('/query?question=' + encodeURIComponent(q));
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '回答失败');
-
-      // 顺序很重要：先建来源卡片，答案里的 [n] 才能找到跳转目标
-      const sourcesBox = renderSources(bubble, data.sources, data.note);
-      renderAnswer(answerEl, data.answer, sourcesBox);
-      answerEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } catch (e) {
-      answerEl.textContent = '出错了：' + e.message;
+      await ask(q);          // 成功失败都会把结果写进气泡里，不用在这里再处理
     } finally {
       askBtn.disabled = false;
       questionInput.focus();
