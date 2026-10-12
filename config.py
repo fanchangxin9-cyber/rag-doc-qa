@@ -11,9 +11,16 @@ config.py —— 全项目的「参数表」
 
 import os
 
-# 密钥真正的值在 secret.py 里（该文件已被 .gitignore 排除，不会泄露到 GitHub）。
+# 密钥的真正值在本机的 secret.py 里（该文件已被 .gitignore 排除，不会泄露到 GitHub）。
 # 这里把它"转发"出来并改名叫 LLM_API_KEY，好处是：想知道配置从哪来，只看这一个文件。
-from secret import DEEPSEEK_API_KEY as LLM_API_KEY
+#
+# 为什么要用 try/except 包住：secret.py 是「本机私密文件」，别人克隆仓库后是【没有】的。
+# 缺了它也必须能正常启动（密钥改在网页的「模型设置」里填），只是这个默认为空。
+# 不这么写，别人 clone 下来第一行就 ModuleNotFoundError，整个服务起不来。
+try:
+    from secret import DEEPSEEK_API_KEY as LLM_API_KEY
+except ImportError:
+    LLM_API_KEY = ""
 
 # 国内下载模型走镜像站。必须在任何模型下载之前设置好，所以放在配置文件里，
 # 保证所有模块 import config 时就已生效。
