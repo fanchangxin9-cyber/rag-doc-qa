@@ -26,3 +26,7 @@ Git入门教程.md
 
 # 运行时设置：里面存着网页上填的 API 密钥，同样绝对不能提交
 settings.json
+
+# 会话记忆：是聊天记录（含你和模型说过的话），不该公开
+# 星号一并盖住 sessions.db-wal / sessions.db-shm 这些 SQLite 的临时伙伴文件
+sessions.db*

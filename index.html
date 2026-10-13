@@ -135,6 +135,64 @@
     border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px;
   }
 
+  /* 历史会话列表 */
+  .hist-list { display: flex; flex-direction: column; gap: 6px; }
+  /* 一行 = 一个容器 + 里面两个按钮（"打开"和"删除"）。
+     为什么不把整行做成一个按钮？因为 HTML 不允许按钮套按钮 ——
+     嵌套的按钮会被浏览器拆开，点击行为也就乱了。 */
+  .hist-item {
+    display: flex; align-items: center;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--card);
+    padding-right: 4px;
+  }
+  .hist-item:hover { background: var(--bg); }
+  /* 当前正在聊的这个会话高亮，免得用户不知道自己在哪一条里 */
+  .hist-item.active { border-color: var(--brand); background: var(--user-bubble); }
+  .hist-open {
+    flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px;
+    text-align: left; padding: 7px 4px 7px 10px;
+    background: none; border: 0; cursor: pointer;
+    font-family: inherit; font-size: 13px; color: var(--text);
+  }
+  .hist-open .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-open .m { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .hist-del {
+    border: 1px solid transparent; background: none; color: var(--muted-light);
+    border-radius: 5px; padding: 2px 7px; font-size: 12px; cursor: pointer; line-height: 1.4;
+  }
+  .hist-del:hover { color: #b91c1c; border-color: #b91c1c; background: #fef2f2; }
+  .hist-empty { font-size: 13px; color: var(--muted); }
+
+  /* 删除会话的确认弹窗 —— 自己做一个，因为原生 window.confirm 塞不进"不再提醒"勾选框 */
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, .35);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  /* [hidden] 属性默认是 display:none，但上面写了 display:flex 会盖掉它，
+     所以必须显式补一句，否则"隐藏"会失效 */
+  .modal-mask[hidden] { display: none; }
+  .modal {
+    background: var(--card); border-radius: 12px; padding: 18px 20px;
+    width: min(420px, calc(100vw - 32px)); box-shadow: 0 10px 40px rgba(0, 0, 0, .2);
+  }
+  .modal h3 { margin: 0 0 10px; font-size: 15px; color: var(--text); }
+  .modal-target {
+    margin: 0 0 10px; padding: 8px 10px; background: var(--bg); border-radius: 6px;
+    font-size: 13px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .modal-warn { margin: 0 0 12px; font-size: 12px; color: #b45309; }
+  .modal-skip {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 14px;
+    font-size: 12px; color: var(--muted); cursor: pointer;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .btn-danger {
+    background: #b91c1c; color: #fff; border: 0; border-radius: 8px;
+    padding: 8px 14px; font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .btn-danger:hover { background: #991b1b; }
+
   /* ============ 本次「流式 + 多轮对话」新增的样式 ============ */
 
   /* 正在流式输出时，答案末尾挂一个闪烁光标 */
@@ -242,6 +300,15 @@
     </section>
 
     <section class="card">
+      <details class="settings" id="histCard" open>
+        <summary>历史会话<span class="cur" id="histCount"></span></summary>
+        <div class="settings-body">
+          <div id="histList" class="hist-list"></div>
+        </div>
+      </details>
+    </section>
+
+    <section class="card">
       <details class="settings">
         <summary>模型设置<span class="cur" id="curModel"></span></summary>
         <div class="settings-body">
@@ -273,6 +340,25 @@
     </section>
   </div>
 
+  <!-- 删除会话的确认弹窗。
+       为什么不用 window.confirm？因为那是浏览器自带的框，我们往里面塞不了
+       "本次不再提醒"这个勾选框。所以自己做一个，样式也跟页面一致。 -->
+  <div class="modal-mask" id="delModal" hidden>
+    <div class="modal">
+      <h3>确定删掉这条会话吗？</h3>
+      <p class="modal-target" id="delModalTarget"></p>
+      <p class="modal-warn">里面的问答记录会被一起清掉，删了就找不回来了。</p>
+      <label class="modal-skip">
+        <input type="checkbox" id="delModalSkip">
+        本次不再提醒（下次打开页面会重新提醒）
+      </label>
+      <div class="modal-actions">
+        <button type="button" id="delModalCancel" class="btn-line">取消</button>
+        <button type="button" id="delModalOk" class="btn-danger">确定删除</button>
+      </div>
+    </div>
+  </div>
+
 <script>
   const fileInput = document.getElementById('file');
   const uploadBtn = document.getElementById('uploadBtn');
@@ -284,10 +370,24 @@
   const docList = document.getElementById('docList');
   const newChatBtn = document.getElementById('newChatBtn');
   const ctxLine = document.getElementById('ctxLine');
+  const histList = document.getElementById('histList');
+  const histCount = document.getElementById('histCount');
+  const delModal = document.getElementById('delModal');
+  const delModalTarget = document.getElementById('delModalTarget');
+  const delModalSkip = document.getElementById('delModalSkip');
+  const delModalOk = document.getElementById('delModalOk');
+  const delModalCancel = document.getElementById('delModalCancel');
 
   // 会话编号：本次谈话的"身份证"，后端靠它把同一会话的前几轮串起来。
-  // crypto.randomUUID() 生成一个几乎不可能重复的字符串；localhost 属于"安全上下文"，可用。
-  let sessionId = crypto.randomUUID();
+  //
+  // 为什么存在 localStorage、而不是每次刷新都新生成一个？
+  //   因为记忆现在存在服务端的 SQLite 里，活得好好的 —— 但页面上要是每次加载
+  //   都换一个新编号，就等于换了个人去问话，服务端存的历史一条也用不上。
+  //   存进 localStorage 之后，刷新页面（以及服务重启）都还是同一个会话，
+  //   之前聊过的内容就能接着用。
+  const SESSION_KEY = 'rag_session_id';
+  let sessionId = localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
+  localStorage.setItem(SESSION_KEY, sessionId);
 
   function setStatus(text, type) {
     uploadStatus.textContent = text;
@@ -302,6 +402,178 @@
     div.textContent = text;
     messages.appendChild(div);
     return div;
+  }
+
+  // ============================================================
+  // 历史会话：列出、进入、把聊天记录还原出来
+  // ============================================================
+  // 为什么要有这一块？
+  //   记忆是存在服务端的（SQLite），但页面刷新之后聊天区是空的 ——
+  //   于是出现"模型记得、用户却看不见"的怪状况：它能接着上一轮聊，
+  //   人却想不起来上一轮到底聊了啥。这里把历史拉回来渲染，两边就对齐了。
+  function mkText(text, cls) {
+    const el = document.createElement('span');
+    if (cls) el.className = cls;
+    el.textContent = text;          // 一律 textContent，绝不拼 HTML
+    return el;
+  }
+
+  function relTime(ts) {
+    if (!ts) return '';
+    const s = Math.floor(Date.now() / 1000 - ts);
+    if (s < 60) return '刚刚';
+    if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+    if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+    return Math.floor(s / 86400) + ' 天前';
+  }
+
+  async function loadSessionList() {
+    let list = [];
+    try {
+      const res = await fetch('/sessions');
+      const data = await res.json();
+      list = (data && data.sessions) || [];
+    } catch (e) {
+      histList.innerHTML = '';
+      histList.appendChild(mkText('读不到历史会话清单。', 'hist-empty'));
+      return;
+    }
+
+    histCount.textContent = list.length ? '共 ' + list.length + ' 个' : '';
+    histList.innerHTML = '';
+    if (list.length === 0) {
+      histList.appendChild(mkText('还没有历史会话。问过问题之后，这里会列出来。', 'hist-empty'));
+      return;
+    }
+
+    list.forEach(function (s) {
+      const row = document.createElement('div');
+      // 当前正在聊的这个高亮，免得用户不知道自己"站在哪一条会话里"
+      row.className = 'hist-item' + (s.session_id === sessionId ? ' active' : '');
+
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'hist-open';
+      open.appendChild(mkText(s.preview || '（无内容）', 't'));
+      open.appendChild(mkText(relTime(s.updated_at) + ' · ' + s.message_count + ' 条', 'm'));
+      open.addEventListener('click', function () { switchSession(s.session_id); });
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'hist-del';
+      del.textContent = '删除';
+      del.title = '删掉这条会话（连同里面的全部问答）';
+      del.addEventListener('click', function () { deleteSession(s.session_id, s.preview); });
+
+      row.appendChild(open);
+      row.appendChild(del);
+      histList.appendChild(row);
+    });
+  }
+
+  function renderHistory(list) {
+    messages.innerHTML = '';
+    if (!list || list.length === 0) {
+      messages.innerHTML = '<p class="empty">还没有对话。先上传文档，然后在这里提问。</p>';
+      return;
+    }
+    // 历史里只存了问答原文，没存当时的资料 —— 所以 [n] 还原出来只是普通文字、点不动
+    list.forEach(function (m) {
+      addMessage(m.content, m.role === 'user' ? 'user' : 'bot');
+    });
+    messages.lastChild.scrollIntoView({ block: 'end' });
+  }
+
+  async function loadHistory() {
+    try {
+      const res = await fetch('/sessions/' + encodeURIComponent(sessionId) + '/messages');
+      const data = await res.json();
+      renderHistory((data && data.messages) || []);
+    } catch (e) {
+      // 拉不到就当空会话处理，别让一个网络抖动把页面卡住
+    }
+  }
+
+  async function switchSession(id) {
+    sessionId = id;
+    localStorage.setItem(SESSION_KEY, sessionId);   // 切了就记住，刷新后还在这一条
+    ctxLine.textContent = '';                        // 用量行说的是"上一轮"，换会话先清掉
+    await loadHistory();
+    await loadSessionList();                         // 重画，把高亮挪到新的这条上
+  }
+
+  // ============================================================
+  // 删除确认弹窗
+  // ============================================================
+  // 为什么自己做一个、不用 window.confirm？
+  //   原生弹窗上塞不了"本次不再提醒"这个勾选框 —— 想加这个功能就必须自己画。
+  //
+  // 「不再提醒」为什么用一个普通变量、不存 localStorage？
+  //   因为要求是"本次使用不再提醒，下次进入网页再提醒"。
+  //   localStorage 会一直记着，下次进来也不提醒了 —— 不符合要求。
+  //   普通变量活在当前页面里，一刷新/重开就归零，正好就是"下次再提醒"。
+  let skipDeleteConfirm = false;
+  let delModalResolve = null;      // 弹窗关掉时要"回话"给当初等它的人
+
+  function confirmDelete(preview) {
+    return new Promise(function (resolve) {
+      delModalResolve = resolve;
+      delModalTarget.textContent = preview || '（无内容）';
+      // 每次弹出都从"没勾"开始 —— 免得上次手滑勾过，这次连确认都没有就删了
+      delModalSkip.checked = false;
+      delModal.hidden = false;
+      delModalOk.focus();
+    });
+  }
+
+  function closeDeleteModal(answer) {
+    delModal.hidden = true;
+    if (delModalResolve) {
+      const finish = delModalResolve;     // 先存下来再清空，避免重复调用
+      delModalResolve = null;
+      finish(answer);
+    }
+  }
+
+  delModalOk.addEventListener('click', function () {
+    if (delModalSkip.checked) skipDeleteConfirm = true;   // 勾了就本次不再问
+    closeDeleteModal(true);
+  });
+  delModalCancel.addEventListener('click', function () { closeDeleteModal(false); });
+  delModal.addEventListener('click', function (e) {
+    if (e.target === delModal) closeDeleteModal(false);   // 点灰色遮罩 = 取消
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !delModal.hidden) closeDeleteModal(false);   // 按 Esc = 取消
+  });
+
+  async function deleteSession(id, preview) {
+    // 「本次不再提醒」勾过之后就直接删，不再弹窗（刷新页面会恢复提醒）
+    if (!skipDeleteConfirm) {
+      const ok = await confirmDelete(preview);
+      if (!ok) return;
+    }
+
+    try {
+      // 后端本来就有这个能力：/session/reset 会把消息和会话一起清掉，不用新加接口
+      await fetch('/session/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: id }),
+      });
+    } catch (e) {
+      // 网络失败就先不管：列表待会儿会重新拉，状态自然对得上
+    }
+
+    if (id === sessionId) {
+      // 删的正好是当前这条 —— 换一个新编号，聊天区清空，免得继续聊到一条已经不存在的记录
+      sessionId = crypto.randomUUID();
+      localStorage.setItem(SESSION_KEY, sessionId);
+      ctxLine.textContent = '';
+      messages.innerHTML = '<p class="empty">还没有对话。先上传文档，然后在这里提问。</p>';
+    }
+
+    await loadSessionList();
   }
 
   // ============================================================
@@ -541,13 +813,18 @@
     // 为什么不在流的过程中就做？因为一边收字一边重排 DOM 又复杂又容易出错。
     if (sourcesBox) renderAnswer(answerEl, fullText, sourcesBox);
     else answerEl.textContent = fullText;
+
+    // 这一轮聊完，历史列表要刷一下：新增了会话、或当前会话的时间/条数都变了
+    loadSessionList();
   }
 
   // 「新对话」：换一个新编号，页面清空
   newChatBtn.addEventListener('click', async () => {
     const oldId = sessionId;
     sessionId = crypto.randomUUID();
+    localStorage.setItem(SESSION_KEY, sessionId);   // 换号要写回去，否则下次刷新又捡起旧编号
     messages.innerHTML = '<p class="empty">还没有对话。先上传文档，然后在这里提问。</p>';
+    ctxLine.textContent = '';
     try {
       await fetch('/session/reset', {
         method: 'POST',
@@ -557,6 +834,7 @@
     } catch (e) {
       // 清不掉也不要紧：就算后端还留着，它迟早会被 MAX_SESSIONS 挤掉
     }
+    loadSessionList();     // 新会话还没内容，列表里暂时不会出现它
   });
 
   // ============================================================
@@ -781,6 +1059,14 @@
       questionInput.focus();
     }
   });
+
+  // ============================================================
+  // 页面一打开：认回上次那个会话，并把聊过的内容显示出来
+  // ============================================================
+  // 这两句是"记忆能被人看见"的关键 —— 少了它们，服务端存着再多历史，
+  // 用户看到的也永远是一张白纸。
+  loadHistory();       // 把当前会话的消息还原到聊天区
+  loadSessionList();   // 列出全部历史会话，好让用户点进去接着聊
 </script>
 </body>
 </html>

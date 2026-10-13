@@ -51,7 +51,10 @@ def handle_knowledge_error(request, exc):
 # ============================================================
 @app.get("/")
 def index():
-    return FileResponse("index.html")
+    # no-cache 很要紧：这个页面是单文件前端，改了 HTML 之后如果浏览器还捧着
+    # 旧缓存跑，新代码就等于没写 —— 实测踩过这个坑（会话编号存 localStorage
+    # 那个修复，就是因为缓存没生效而"看起来没用"）。
+    return FileResponse("index.html", headers={"Cache-Control": "no-cache"})
 
 
 # ============================================================
@@ -163,6 +166,24 @@ def chat(req: ChatRequest):
 def reset_session(req: SessionRequest):
     session.reset(req.session_id)
     return {"msg": "会话已清空"}
+
+
+@app.get("/sessions")
+def list_sessions():
+    """历史会话清单（最近用过的在前）—— 前端拿它渲染「历史会话」列表"""
+    return {"sessions": session.list_sessions()}
+
+
+@app.get("/sessions/{session_id}/messages")
+def session_messages(session_id: str):
+    """拉回某个会话的历史消息。
+
+    为什么需要它：历史虽然存在服务端，但页面上没有 —— 刷新一下聊天区就空了。
+    有了这个接口，前端就能把对话"还原"出来，用户才看得见自己聊过什么。
+    （记忆只存了问答原文，没存检索到的资料，所以还原出来的答案里 [n]
+      只是普通文字、点不动 —— 这是当前取舍。）
+    """
+    return {"messages": session.get(session_id)}
 
 
 # ============================================================
