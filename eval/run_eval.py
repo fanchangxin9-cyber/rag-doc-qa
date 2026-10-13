@@ -72,6 +72,12 @@ DOC_PARAGRAPHS = [
     ("p", "出差期间因私绕道的，绕道段的交通与住宿费用一律自理。"),
     ("heading", "▎ 制度编号"),
     ("p", "本《差旅报销制度》的归档编号为 HT-2024-0917，行文引用时请标注该编号。"),
+    ("heading", "▎ 合同编号"),
+    ("p", "采购框架协议的统一编号为 CG-2025-0088，签约时须在合同首页标注该编号。"),
+    ("heading", "▎ 门禁设备编号"),
+    ("p", "园区门禁设备的报修编号为 SB-2023-0451，报修时请提供该编号。"),
+    ("heading", "▎ 培训课程编号"),
+    ("p", "新员工必修课《信息安全》的课程编号为 KC-2022-0772。"),
 
     ("heading", "▎ 会议费标准"),
     ("p", "会议费按每人每天 200 元标准执行，含场地与茶歇。"),
@@ -136,6 +142,53 @@ DOC_TABLE = [
 
 
 # ============================================================
+# 一·五、批量生成的"干扰条款" —— 语料必须先够大，指标才有区分度
+# ============================================================
+# 为什么非要有它们？
+#   上一版语料只有 33 块，而向量粗召回一次就取 20 条 —— 等于把六成语料都捞出来了，
+#   "找得准"根本无从谈起，关键词那一路自然显不出任何优势。
+#   放进足够多的干扰条款后，前 20 条才是一次真正的挑选，两路召回才能公平比较。
+#
+# 但干扰条款不能只是凑数，它们必须【语义上很像、字面上不同】才有意义：
+#   都是"住宿费上限"的条款，只有金额和适用人群不同 —— 这正是真实文档的样子，
+#   也正好卡在纯向量检索的软肋上（它分不清这些条款之间那点数字差别）。
+#
+# 全部由下标算式生成、不用随机数 —— 跑几遍结果都一样（可复现）。
+def build_distractors() -> list:
+    out = []
+
+    # ① 住宿 / 交通类补充规定：都带"住宿费""上限"，但人群和金额都不同。
+    #    金额刻意避开正确答案里的 600，交通费避开 100 —— 免得干扰项反而"蒙对"。
+    scopes = ["外派", "实习生", "兼职", "劳务派遣", "外部顾问", "分公司", "海外派驻"]
+    for i, scope in enumerate(scopes):
+        for j in range(3):
+            hotel = 420 + i * 7 + j * 11          # 最大 484，始终不等于 600
+            traffic = 60 + j * 5                  # 60 / 65 / 70，不等于 100
+            out.append(("heading", f"▎ {scope}差旅补充规定 {j + 1}"))
+            out.append(("p", f"{scope}人员住宿费上限为 {hotel} 元/晚，"
+                             f"市内交通费按 {traffic} 元/天执行，超出部分自理。"))
+
+    # ② 归档编号类：按"编号家族"各生成 10 条，长得几乎一样。
+    #    问「HY-2024-0331 对应哪份文件」时，纯向量很难从这一堆里挑对，
+    #    而关键词检索对 "0331" 这串字符是精确命中的 —— 这正是要量出来的东西。
+    #    刻意让干扰编号与正确答案【同前缀】（HT/CG/SB/KC-20xx），才够难。
+    for family in ["HT-2024", "CG-2025", "SB-2023", "KC-2022"]:
+        for i in range(10):
+            code = f"{family}-{100 + i:04d}"       # 0100…0109，不会撞上答案里的 0917/0331/0088/0451/0772
+            out.append(("heading", f"▎ {family} 归档编号 {i + 1}"))
+            out.append(("p", f"归档编号 {code} 对应《内部制度附件第 {i + 1} 号》，"
+                             f"仅供存档登记时核对使用。"))
+
+    # ③ 通用附则：纯凑体量，让"前 20 条"变成真正的筛选。
+    for i in range(80):
+        out.append(("heading", f"▎ 附则 {i + 1}"))
+        out.append(("p", f"本规定第 {i + 1} 条自发布之日起施行，"
+                         f"未尽事宜由行政部负责解释与修订。"))
+
+    return out
+
+
+# ============================================================
 # 二、考题集 —— 每题的 expect 是"这段内容应该落在哪个 location 里"
 # ============================================================
 # kind 只用来分组统计，好看出"关键词检索到底在哪些题型上帮了忙"：
@@ -164,10 +217,13 @@ CASES = [
     {"q": "货送到以后要做完哪些事才算数？",         "expect": "▎ 验收流程", "kind": "semantic"},
 
     # —— 编号类：专有编号是纯向量检索最典型的软肋 ——
-    #   两个编号长得很像（都是 XX-2024-0XXX），靠"意思像不像"很难分开；
+    #   干扰语料里塞了 40 条"同前缀、只差四个数字"的编号条款，靠"意思像不像"很难分开；
     #   但关键词检索对这几个字符是精确命中的。这正是当初"型号/条款编号答不上来"的场景。
     {"q": "HT-2024-0917 是哪个制度的编号？",       "expect": "▎ 制度编号", "kind": "code"},
     {"q": "HY-2024-0331 对应哪份文件？",           "expect": "▎ 会议制度编号", "kind": "code"},
+    {"q": "CG-2025-0088 是什么编号？",             "expect": "▎ 合同编号", "kind": "code"},
+    {"q": "SB-2023-0451 这个编号是干什么用的？",   "expect": "▎ 门禁设备编号", "kind": "code"},
+    {"q": "KC-2022-0772 是哪门课的编号？",         "expect": "▎ 培训课程编号", "kind": "code"},
 ]
 
 
@@ -184,7 +240,7 @@ def build_test_docx() -> str:
     from docx import Document
 
     doc = Document()
-    for kind, text in DOC_PARAGRAPHS:
+    for kind, text in DOC_PARAGRAPHS + build_distractors():
         doc.add_paragraph(text)
 
     table = doc.add_table(rows=len(DOC_TABLE), cols=len(DOC_TABLE[0]))
@@ -268,6 +324,45 @@ def score_config(db, corpus, name, fn, verbose=False):
     return result
 
 
+def attribute(db, corpus, verbose=False):
+    """正确段落"死在哪一层"—— 把每个阶段的功劳分清楚。
+
+    为什么要单独做这件事？
+      只看最终命中率，没法分清到底是谁的功劳：既可能是关键词检索把正确段落
+      捞进了候选池，也可能它本来就一直在池子里、只是重排最后把它排上来的。
+      不弄清楚，就容易把重排的功劳记到关键词头上（或者反过来）。
+    """
+    layers = ["向量粗召回", "关键词粗召回", "融合候选池", "最终前5（线上）"]
+    counts = dict.fromkeys(layers, 0)
+
+    for case in CASES:
+        exp = case["expect"]
+
+        vec = retrieval.VectorRetriever(db).search(case["q"], config.VECTOR_K)
+        kw = retrieval.KeywordRetriever(corpus).search(case["q"], config.KEYWORD_K)
+        fused = retrieval.fuse([vec, kw], config.RRF_WEIGHTS, config.RRF_C)
+        final = _hybrid_rerank(db, case["q"], corpus)
+
+        hit = lambda docs: any(d.metadata.get("location") == exp for d in docs)   # noqa: E731
+        if hit(vec):
+            counts["向量粗召回"] += 1
+        if hit(kw):
+            counts["关键词粗召回"] += 1
+        if hit(fused):
+            counts["融合候选池"] += 1
+        if hit(final):
+            counts["最终前5（线上）"] += 1
+
+        if verbose:
+            print(f"     {case['expect']:<16} "
+                  f"向量{'✓' if hit(vec) else '✗'} "
+                  f"关键词{'✓' if hit(kw) else '✗'} "
+                  f"融合{'✓' if hit(fused) else '✗'} "
+                  f"最终{'✓' if hit(final) else '✗'}")
+
+    return counts, len(CASES), layers
+
+
 def fmt(x) -> str:
     return f"{x * 100:5.0f}%"
 
@@ -339,6 +434,20 @@ def main():
         print(row)
     print()
     print("（列顺序与上表一致：只用向量 / 混合 / 混合+重排）")
+
+    # ⑥ 归因：正确段落是"死在哪一层"的 —— 分清是召回没捞到，还是排序没排上来
+    print()
+    print("=" * 78)
+    print("归因：正确段落有没有被这一层捞到")
+    print("=" * 78)
+    counts, total, layers = attribute(db, corpus, verbose)
+    for name in layers:
+        c = counts[name]
+        print(f"   {name:<18}{c:>3}/{total}  {fmt(c / total)}")
+    print()
+    print("怎么读这几行：")
+    print("   · 上一层没捞到、下一层捞到了 → 说明【下一层】补上了召回")
+    print("   · 全都捞到了、只有最后一行满 → 说明排序是靠【重排】救回来的")
     return 0
 
 
